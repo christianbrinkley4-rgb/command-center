@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Command Center — NC Wealth Protection</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">CC</div>
+    <div>
+      <div class="brand-title">COMMAND CENTER</div>
+      <div class="brand-sub">Medicare T65 Operations · NC Wealth Protection</div>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-view="overview">Overview</button>
+    <button class="tab" data-view="leads">Lead Book</button>
+  </nav>
+  <div class="topbar-right">
+    <span class="sync-dot" id="syncDot"></span>
+    <span class="sync-text" id="syncText">syncing…</span>
+    <button class="btn-ghost" id="refreshBtn" title="Sync now">⟳</button>
+  </div>
+</header>
+
+<main>
+  <!-- ============ OVERVIEW ============ -->
+  <section id="view-overview" class="view">
+    <div class="kpi-grid" id="kpiGrid"></div>
+
+    <div class="panel-row">
+      <div class="panel panel-wide">
+        <div class="panel-head"><h3>Calls &amp; Live Conversations — last 14 days</h3></div>
+        <canvas id="chartTrend" height="90"></canvas>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Outcome Mix</h3></div>
+        <canvas id="chartDonut" height="180"></canvas>
+      </div>
+    </div>
+
+    <div class="panel-row">
+      <div class="panel">
+        <div class="panel-head"><h3>Today by Hour</h3></div>
+        <canvas id="chartHour" height="150"></canvas>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Pipeline Funnel</h3></div>
+        <div class="funnel" id="funnel"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>By Agent</h3></div>
+        <div id="perAgent" class="agent-list"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h3>Live Activity</h3><span class="muted" id="activityMuted"></span></div>
+      <div class="activity" id="activity"></div>
+    </div>
+  </section>
+
+  <!-- ============ LEAD BOOK ============ -->
+  <section id="view-leads" class="view hidden">
+    <div class="leadbook-controls">
+      <input type="text" id="leadSearch" placeholder="Search name, phone, or city…" autocomplete="off">
+      <div class="chips" id="stageChips"></div>
+      <div class="spacer"></div>
+      <span class="muted" id="leadCount"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="leads-table">
+        <thead><tr>
+          <th data-sort="name">Name</th><th>Age</th><th>City</th><th>Phone</th>
+          <th>Source</th><th data-sort="calls">Calls</th><th>Stage</th>
+          <th data-sort="score">Score</th><th data-sort="last_activity_at">Last Activity</th><th>Agent</th>
+        </tr></thead>
+        <tbody id="leadsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ LEAD DETAIL ============ -->
+  <section id="view-lead" class="view hidden">
+    <button class="btn-ghost back" id="backBtn">← Back to Lead Book</button>
+    <div class="lead-detail">
+      <aside class="contact-card" id="contactCard"></aside>
+      <div class="timeline-wrap">
+        <div class="panel-head"><h3>Full Timeline</h3></div>
+        <div class="timeline" id="timeline"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

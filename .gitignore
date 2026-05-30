@@ -1,0 +1,9 @@
+# never commit data or secrets
+command_center.db
+command_center.db-wal
+command_center.db-shm
+*.log
+__pycache__/
+data/
+.env
+*.xlsx
