@@ -289,7 +289,90 @@ def leads_disposition():
                 conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
                              (r["e164"], "dnc", _now()))
         db.audit(conn, "person", pid, "disposition", disposition)
-    return jsonify({"ok": True, "stage": new_stage, "category": category})
+
+        # AUTOMATION: schedule the next best action for this outcome (the well-oiled machine).
+        scheduled = []
+        try:
+            import automation
+            owner_row = conn.execute("SELECT owner FROM people WHERE id=?", (pid,)).fetchone()
+            owner = owner_row["owner"] if owner_row else ""
+            if category in ("dnc",):
+                automation.cancel_pending(conn, pid, "dnc")
+            elif category == "contacted":
+                automation.cancel_pending(conn, pid, "reached")  # human reached; stop auto-chase
+            else:
+                scheduled = automation.plan_next_action(conn, pid, disposition, category, owner)
+        except Exception:
+            pass
+    return jsonify({"ok": True, "stage": new_stage, "category": category, "scheduled": scheduled})
+
+
+@agent_api.route("/agent/inbound", methods=["POST"])
+def inbound_reply():
+    """A prospect replied (text / email / voicemail transcript). The machine reads the
+    intent + any requested time and schedules the next action automatically — e.g.
+    "call me 10am next Wednesday" -> a call task lands on that day/time; "STOP" -> opt-out.
+    Body: {phone or email or person_id, channel: sms|email, text: "...", agent?}"""
+    import automation
+    import nlp_time
+    d = request.get_json(silent=True) or {}
+    text = _clean(d.get("text"))
+    channel = _clean(d.get("channel")) or "sms"
+    phone = db.normalize_phone(d.get("phone"))
+    email = _clean(d.get("email")).lower()
+    pid = d.get("person_id")
+
+    with db.connect() as conn:
+        if not pid and phone:
+            r = conn.execute("SELECT person_id FROM phone_numbers WHERE e164=?", (phone,)).fetchone()
+            pid = r["person_id"] if r else None
+        if not pid and email:
+            r = conn.execute("SELECT id FROM people WHERE lower(email)=?", (email,)).fetchone()
+            pid = r["id"] if r else None
+        if not pid:
+            return jsonify({"error": "could not match a person (send person_id, phone, or email)"}), 404
+
+        # record the inbound message
+        conn.execute("""INSERT INTO messages(person_id, channel, direction, body, status, created_at, replied_at)
+                        VALUES (?,?, 'in', ?, 'received', ?, ?)""",
+                     (pid, channel, text, _now(), _now()))
+
+        parsed = nlp_time.parse_reply(text)
+        intent, when = parsed["intent"], parsed["when"]
+        result = {"intent": intent, "person_id": pid, "scheduled": None}
+
+        if intent == "stop" or intent == "not_interested":
+            reason = "opt_out" if intent == "stop" else "not_interested"
+            conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('person',?,?,?)",
+                         (str(pid), reason, _now()))
+            for r in conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=?", (pid,)):
+                conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
+                             (r["e164"], reason, _now()))
+            conn.execute("UPDATE people SET stage='dnc', last_activity_at=? WHERE id=?", (_now(), pid))
+            automation.cancel_pending(conn, pid, reason)
+            db.audit(conn, "person", pid, "inbound_optout", text[:80])
+        elif when is not None or intent in ("callback", "yes"):
+            # schedule the requested (or default) callback time as a real call task
+            from datetime import datetime, timedelta
+            call_dt = when or (datetime.now() + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+            owner_row = conn.execute("SELECT owner FROM people WHERE id=?", (pid,)).fetchone()
+            owner = owner_row["owner"] if owner_row else ""
+            automation.cancel_pending(conn, pid, "replaced_by_callback")
+            tid = automation.schedule_task(conn, pid, "call", call_dt.isoformat(timespec="seconds"),
+                                           "inbound_callback_request", _phone_for(conn, pid), "", owner,
+                                           dedupe_key=f"{pid}|call|inbound|{call_dt:%Y%m%d%H%M}")
+            conn.execute("UPDATE people SET stage='callback', last_activity_at=? WHERE id=?", (_now(), pid))
+            conn.execute("INSERT INTO person_notes(person_id, body, author, created_at) VALUES (?,?,?,?)",
+                         (pid, f"Inbound reply: \"{text}\" → call scheduled {call_dt:%a %m/%d %I:%M%p}",
+                          "automation", _now()))
+            result["scheduled"] = {"kind": "call", "due_at": call_dt.isoformat(timespec="seconds")}
+            db.audit(conn, "person", pid, "inbound_callback", f"{call_dt:%Y-%m-%d %H:%M}")
+    return jsonify({"ok": True, **result})
+
+
+def _phone_for(conn, pid):
+    r = conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=? LIMIT 1", (pid,)).fetchone()
+    return r["e164"] if r else ""
 
 
 # ------------------------------------------------------------------ 3) messaging agent

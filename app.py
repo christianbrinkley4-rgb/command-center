@@ -335,6 +335,60 @@ def api_set_stage(pid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/leads/bulk", methods=["POST"])
+def api_bulk():
+    """Bulk action on selected leads from the Lead Book: assign owner, set DNC, or
+    re-tag source. Saves a ton of clicks for a 2-person team."""
+    d = request.json or {}
+    ids = [int(x) for x in (d.get("ids") or []) if str(x).isdigit()]
+    action = (d.get("action") or "").strip()
+    value = (d.get("value") or "").strip()
+    if not ids or not action:
+        return jsonify({"error": "ids and action required"}), 400
+    qmarks = ",".join("?" * len(ids))
+    done = 0
+    with db.connect() as conn:
+        if action == "owner":
+            done = conn.execute(f"UPDATE people SET owner=? WHERE id IN ({qmarks})", [value] + ids).rowcount
+        elif action == "source":
+            done = conn.execute(f"UPDATE people SET source=? WHERE id IN ({qmarks})", [value] + ids).rowcount
+        elif action == "dnc":
+            done = conn.execute(f"UPDATE people SET stage='dnc' WHERE id IN ({qmarks})", ids).rowcount
+            for pid in ids:
+                for r in conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=?", (pid,)):
+                    conn.execute("INSERT OR IGNORE INTO suppressions(scope,value,reason,created_at) VALUES ('phone',?,'dnc',?)",
+                                 (r["e164"], datetime.now().isoformat(timespec="seconds")))
+        else:
+            return jsonify({"error": "unknown action"}), 400
+        db.audit(conn, "bulk", action, "applied", f"{done} leads -> {value}")
+    return jsonify({"ok": True, "updated": done})
+
+
+@app.route("/api/briefing")
+def api_briefing():
+    """Morning briefing: a plain-English summary of what to do today + yesterday's wins."""
+    from datetime import timedelta as _td
+    today = date.today().isoformat()
+    yest = (date.today() - _td(days=1)).isoformat()
+    with db.connect() as conn:
+        def one(sql, p=()):
+            return conn.execute(sql, p).fetchone()["n"]
+        callbacks = one("SELECT COUNT(*) n FROM people WHERE stage='callback'")
+        appts = one("SELECT COUNT(*) n FROM appointments WHERE substr(scheduled_at,1,10)>=? OR status='scheduled'", (today,))
+        calls_due = one("SELECT COUNT(*) n FROM scheduled_tasks WHERE kind='call' AND status='pending' AND substr(due_at,1,10)<=?", (today,))
+        texts_q = one("SELECT COUNT(*) n FROM scheduled_tasks WHERE kind='sms' AND status='pending'")
+        y_live = one("SELECT COUNT(*) n FROM call_attempts WHERE substr(dialed_at,1,10)=? AND disposition_category='live_conversation'", (yest,))
+        y_calls = one("SELECT COUNT(*) n FROM call_attempts WHERE substr(dialed_at,1,10)=?", (yest,))
+        fresh = one("SELECT COUNT(*) n FROM people WHERE stage='new'")
+    lines = []
+    if callbacks: lines.append(f"{callbacks} callback{'s' if callbacks!=1 else ''} waiting — your warmest leads.")
+    if calls_due: lines.append(f"{calls_due} scheduled call{'s' if calls_due!=1 else ''} due today.")
+    if fresh: lines.append(f"{fresh} fresh lead{'s' if fresh!=1 else ''} ready to dial.")
+    if texts_q: lines.append(f"{texts_q} follow-up text{'s' if texts_q!=1 else ''} queued to send automatically.")
+    if y_calls: lines.append(f"Yesterday: {y_live} live conversation{'s' if y_live!=1 else ''} from {y_calls} calls.")
+    return jsonify({"date": today, "headline": "Here's your day", "lines": lines or ["All caught up — import a list to get rolling."]})
+
+
 @app.route("/api/sync", methods=["POST"])
 def api_sync():
     return jsonify({"results": sync.sync_all()})
@@ -433,6 +487,58 @@ def api_ingest():
     return jsonify({"ok": True, "agent": agent})
 
 
+# ----------------------------- automations + insights -----------------------------
+
+@app.route("/api/automations")
+def api_automations():
+    """The automation control panel: what's scheduled, what fired, what's due today."""
+    import automation
+    automation.ensure_schema()
+    today = date.today().isoformat()
+    owner = (request.args.get("owner") or "").strip().lower()
+    own = " AND s.owner=?" if owner else ""
+    own_p = [owner] if owner else []
+    with db.connect() as conn:
+        def rows(sql, p=()):
+            return [dict(r) for r in conn.execute(sql, p)]
+        upcoming = rows(f"""
+            SELECT s.id, s.kind, s.reason, s.due_at, s.status, s.channel_to, p.id person_id,
+                   p.full_name, p.city, p.owner
+            FROM scheduled_tasks s JOIN people p ON p.id=s.person_id
+            WHERE s.status='pending'{own} ORDER BY s.due_at LIMIT 200""", own_p)
+        recent = rows(f"""
+            SELECT s.kind, s.reason, s.fired_at, s.status, p.full_name, p.id person_id
+            FROM scheduled_tasks s JOIN people p ON p.id=s.person_id
+            WHERE s.fired_at IS NOT NULL AND s.fired_at<>''{own}
+            ORDER BY s.fired_at DESC LIMIT 40""", own_p)
+        counts = {
+            "calls_due_today": conn.execute(
+                "SELECT COUNT(*) n FROM scheduled_tasks WHERE kind='call' AND status='pending' AND substr(due_at,1,10)<=?",
+                (today,)).fetchone()["n"],
+            "texts_queued": conn.execute(
+                "SELECT COUNT(*) n FROM scheduled_tasks WHERE kind='sms' AND status='pending'").fetchone()["n"],
+            "emails_queued": conn.execute(
+                "SELECT COUNT(*) n FROM scheduled_tasks WHERE kind='email' AND status='pending'").fetchone()["n"],
+            "fired_today": conn.execute(
+                "SELECT COUNT(*) n FROM scheduled_tasks WHERE substr(fired_at,1,10)=?", (today,)).fetchone()["n"],
+        }
+    return jsonify({"counts": counts, "upcoming": upcoming, "recent": recent,
+                    "synced_at": datetime.now().strftime("%I:%M:%S %p")})
+
+
+@app.route("/api/insights")
+def api_insights():
+    import learning
+    return jsonify(learning.get_stats())
+
+
+@app.route("/api/automations/run", methods=["POST"])
+def api_run_automations():
+    """Manually fire due tasks now (the worker also does this every minute)."""
+    import automation
+    return jsonify(automation.fire_due_tasks())
+
+
 # ----------------------------- pages -----------------------------
 
 @app.route("/")
@@ -451,12 +557,33 @@ def _background_sync():
         time.sleep(SYNC_INTERVAL)
 
 
+WORKER_INTERVAL = int(os.getenv("CC_WORKER_SECONDS", "60"))
+
+
+def _background_worker():
+    """The machine that keeps running: every minute it fires due scheduled tasks —
+    surfaces calls on the right day, sends/queues follow-up texts & emails — and
+    recomputes learning stats. No manual action required."""
+    import automation
+    import learning
+    while True:
+        try:
+            automation.fire_due_tasks()
+        except Exception:
+            pass
+        try:
+            learning.refresh_stats()
+        except Exception:
+            pass
+        time.sleep(WORKER_INTERVAL)
+
+
 _started = False
 
 
 def start_background(initial=True):
-    """Initialize the DB and launch the sync loop. Runs once, whether started by
-    gunicorn (on import) or by `python app.py` directly."""
+    """Initialize the DB and launch the sync + automation worker loops. Runs once,
+    whether started by gunicorn (on import) or by `python app.py` directly."""
     global _started
     if _started:
         return
@@ -466,12 +593,19 @@ def start_background(initial=True):
         _agent_ensure_columns()  # add people.email + messages.subject if missing
     except Exception as exc:
         print("column ensure warning:", exc)
+    try:
+        import automation
+        automation.ensure_schema()  # scheduled_tasks + automation_log
+    except Exception as exc:
+        print("automation schema warning:", exc)
     if initial:
         try:
             sync.sync_all()
         except Exception as exc:
             print("initial sync warning:", exc)
     threading.Thread(target=_background_sync, daemon=True).start()
+    if os.getenv("CC_WORKER_ENABLED", "1") not in ("0", "false", "no"):
+        threading.Thread(target=_background_worker, daemon=True).start()
 
 
 # Start on import so production servers (gunicorn app:app) initialize correctly.

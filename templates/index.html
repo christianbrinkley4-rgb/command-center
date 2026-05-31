@@ -20,6 +20,7 @@
   </div>
   <nav class="tabs">
     <button class="tab active" data-view="today">Today</button>
+    <button class="tab" data-view="automations">Automations</button>
     <button class="tab" data-view="analytics">Analytics</button>
     <button class="tab" data-view="leads">Lead Book</button>
   </nav>
@@ -38,6 +39,7 @@
 <main>
   <!-- ============ TODAY / ACTION QUEUE ============ -->
   <section id="view-today" class="view">
+    <div class="briefing" id="briefing"></div>
     <div class="hero-strip">
       <div class="hero-card">
         <div class="hero-val" id="heroAppts">—</div>
@@ -60,6 +62,33 @@
         <div class="queue-head"><span class="qh-dot c-call"></span><h3>Call Next — Best Leads</h3><span class="qh-count" id="cnCount">0</span></div>
         <div class="queue-list" id="callNextList"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- ============ AUTOMATIONS ============ -->
+  <section id="view-automations" class="view hidden">
+    <div class="auto-banner">
+      <div class="auto-pulse"></div>
+      <div>
+        <div class="auto-title">The machine is running</div>
+        <div class="auto-desc">Every minute it schedules the next best action, fires due texts &amp; calls, and learns what works. No manual work needed.</div>
+      </div>
+      <button class="btn-pill" id="runNowBtn" title="Fire due tasks now">▶ Run now</button>
+    </div>
+    <div class="auto-counts" id="autoCounts"></div>
+    <div class="panel-row">
+      <div class="panel panel-wide">
+        <div class="panel-head"><h3>Upcoming — what's scheduled next</h3><span class="muted" id="upCount"></span></div>
+        <div class="auto-list" id="upcomingList"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>What the system learned</h3></div>
+        <div class="insights" id="insights"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Recently fired automatically</h3></div>
+      <div class="auto-list" id="firedList"></div>
     </div>
   </section>
 

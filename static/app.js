@@ -43,6 +43,7 @@ function showView(v) {
 $$(".tab").forEach(t => t.onclick = () => {
   showView(t.dataset.view);
   if (t.dataset.view === "today") loadToday();
+  if (t.dataset.view === "automations") loadAutomations();
   if (t.dataset.view === "analytics") loadAnalytics();
   if (t.dataset.view === "leads") loadLeads();
 });
@@ -60,6 +61,12 @@ $$("#ownerToggle .ot").forEach(b => b.onclick = () => {
 /* ---------------- TODAY / action queue ---------------- */
 async function loadToday() {
   const qs = ownerFilter ? "?owner=" + ownerFilter : "";
+  fetch("/api/briefing").then(r => r.json()).then(b => {
+    const hour = new Date().getHours();
+    const greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+    $("#briefing").innerHTML = `<div class="brief-greet">${greet}, Chris 👋</div>
+      <ul class="brief-list">${b.lines.map(l => `<li>${esc(l)}</li>`).join("")}</ul>`;
+  });
   const d = await (await fetch("/api/action-queue" + qs)).json();
   const h = d.hero;
   $("#heroAppts").textContent = h.appointments_total;
@@ -108,6 +115,69 @@ function apptRow(a) {
 function emptyState(title, sub) {
   return `<div class="empty"><div class="empty-t">${esc(title)}</div><div class="empty-s">${esc(sub)}</div></div>`;
 }
+
+/* ---------------- AUTOMATIONS ---------------- */
+const KIND_ICON = { call: "📞", sms: "💬", email: "✉️" };
+const REASON_LABEL = {
+  post_voicemail_text: "Follow-up text after voicemail", redial_after_voicemail: "Redial after voicemail",
+  retry_no_answer_0: "Retry — no answer", retry_no_answer_1: "Retry — no answer (2nd)",
+  retry_no_answer_2: "Retry — no answer (3rd)", retry_no_answer_3: "Retry — no answer (4th)",
+  callback_default: "Scheduled callback", inbound_callback_request: "Callback they requested",
+  nurture_email_1: "Intro nurture email", appt_reminder_24h: "Appointment reminder (24h)",
+  appt_reminder_morning: "Appointment reminder (morning of)",
+};
+const rlabel = r => REASON_LABEL[r] || (r || "").replace(/_/g, " ");
+
+async function loadAutomations() {
+  const qs = ownerFilter ? "?owner=" + ownerFilter : "";
+  const [a, ins] = await Promise.all([
+    (await fetch("/api/automations" + qs)).json(),
+    (await fetch("/api/insights")).json(),
+  ]);
+  const c = a.counts;
+  $("#autoCounts").innerHTML = [
+    ["📞", c.calls_due_today, "Calls Due Today", "c-call"],
+    ["💬", c.texts_queued, "Texts Queued", "c-sms"],
+    ["✉️", c.emails_queued, "Emails Queued", "c-email"],
+    ["⚡", c.fired_today, "Fired Today", "c-fired"],
+  ].map(([ic, v, l, cl]) => `<div class="ac ${cl}"><div class="ac-ic">${ic}</div><div><div class="ac-val">${v}</div><div class="ac-lab">${l}</div></div></div>`).join("");
+
+  $("#upCount").textContent = a.upcoming.length + " scheduled";
+  $("#upcomingList").innerHTML = a.upcoming.map(t => autoRow(t, true)).join("")
+    || emptyState("Nothing scheduled yet", "As calls get dispositioned, the next actions appear here automatically.");
+  $("#firedList").innerHTML = a.recent.map(t => autoRow(t, false)).join("")
+    || emptyState("Nothing fired yet", "When a scheduled text or call comes due, it shows here.");
+
+  $("#insights").innerHTML = renderInsights(ins);
+  $("#syncText").textContent = "synced " + a.synced_at;
+}
+function autoRow(t, upcoming) {
+  const when = upcoming ? fmtClock(t.due_at) : fmtClock(t.fired_at);
+  const tag = upcoming ? "" : `<span class="badge b-${t.status === 'sent' ? 'voicemail' : t.status === 'done' ? 'contacted' : 'attempted'}">${esc(t.status)}</span>`;
+  return `<div class="auto-r" onclick="openLead(${t.person_id})">
+    <span class="auto-ic">${KIND_ICON[t.kind] || "•"}</span>
+    <div class="auto-main"><div class="auto-name">${esc(t.full_name || "Unknown")}</div>
+      <div class="auto-reason">${esc(rlabel(t.reason))}${t.city ? " · " + esc(t.city) : ""}</div></div>
+    <div class="auto-when">${when} ${tag}</div></div>`;
+}
+function renderInsights(ins) {
+  const rows = [];
+  if (ins.overall_contact_rate) rows.push(["Overall contact rate", ins.overall_contact_rate.detail, "var(--green)"]);
+  if (ins.best_call_hour) rows.push(["Best hour to call", ins.best_call_hour.label + " — " + ins.best_call_hour.detail, "var(--cyan)"]);
+  if (ins.best_call_dow) rows.push(["Best day to call", ins.best_call_dow.label + " — " + ins.best_call_dow.detail, "var(--cyan)"]);
+  const src = Object.entries(ins.sources || {}).sort((a, b) => b[1].rate - a[1].rate).slice(0, 5);
+  let html = rows.map(([l, v, col]) => `<div class="ins-row"><div class="ins-l">${esc(l)}</div><div class="ins-v" style="color:${col}">${esc(v)}</div></div>`).join("");
+  if (src.length) {
+    html += `<div class="ins-sub">Source quality (live-conversation rate)</div>`;
+    html += src.map(([s, d]) => `<div class="ins-row"><div class="ins-l">${esc(s)}</div><div class="ins-v">${(d.rate * 100).toFixed(0)}%</div></div>`).join("");
+  }
+  return html || `<div class="muted">Learning from your calls… insights appear as volume grows.</div>`;
+}
+$("#runNowBtn") && ($("#runNowBtn").onclick = async () => {
+  const r = await (await fetch("/api/automations/run", { method: "POST" })).json();
+  toast(`Fired: ${r.sms || 0} texts · ${r.call_ready || 0} calls surfaced · ${r.email || 0} emails`);
+  loadAutomations();
+});
 
 /* ---------------- ANALYTICS ---------------- */
 async function loadAnalytics() {
@@ -337,13 +407,27 @@ $("#apptSave").onclick = async () => {
   if (currentLead === apptLeadId) openLead(apptLeadId); else refreshVisibleView();
 };
 
+/* ---------------- keyboard shortcuts ---------------- */
+const VIEW_KEYS = { "1": "today", "2": "automations", "3": "analytics", "4": "leads" };
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { $("#apptModal").classList.add("hidden"); return; }
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  if (typing) return;
+  if (e.key === "/") { e.preventDefault(); showView("leads"); loadLeads(); setTimeout(() => $("#leadSearch").focus(), 50); return; }
+  if (VIEW_KEYS[e.key]) {
+    const v = VIEW_KEYS[e.key]; showView(v);
+    ({ today: loadToday, automations: loadAutomations, analytics: loadAnalytics, leads: loadLeads }[v])();
+  }
+  if (e.key.toLowerCase() === "r") { fetch("/api/sync", { method: "POST" }).then(refreshVisibleView); toast("Refreshed"); }
+});
+
 /* ---------------- boot ---------------- */
 function refreshVisibleView() {
   if (activeView === "today") loadToday();
+  else if (activeView === "automations") loadAutomations();
   else if (activeView === "analytics") loadAnalytics();
   else if (activeView === "leads") loadLeads();
   else if (activeView === "lead" && currentLead) openLead(currentLead);
 }
-document.addEventListener("keydown", e => { if (e.key === "Escape") $("#apptModal").classList.add("hidden"); });
 loadToday();
 setInterval(refreshVisibleView, 15000);
