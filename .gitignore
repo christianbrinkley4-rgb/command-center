@@ -14,3 +14,4 @@ UPDATE_DROPLET.txt
 build/
 dist/
 *.spec
+GO_LIVE_AGENTS.txt

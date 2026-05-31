@@ -159,6 +159,9 @@ def api_action_queue():
     Three buckets — callbacks due (warmest), appointments to confirm, and the
     prioritized 'call next' list (best-scoring leads not yet reached)."""
     today = date.today().isoformat()
+    owner = (request.args.get("owner") or "").strip().lower()
+    own_sql = " AND owner=?" if owner else ""
+    own_p = [owner] if owner else []
     with db.connect() as conn:
         def phone_of(pid):
             r = conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=? LIMIT 1", (pid,)).fetchone()
@@ -167,32 +170,33 @@ def api_action_queue():
         # 1) Callbacks the prospect asked for — top priority.
         callbacks = []
         for r in conn.execute(
-            """SELECT id, full_name, city, county, birthday, owner, lead_score, last_activity_at
-               FROM people WHERE stage='callback' ORDER BY last_activity_at DESC LIMIT 100"""):
+            f"""SELECT id, full_name, city, county, birthday, owner, lead_score, last_activity_at
+               FROM people WHERE stage='callback'{own_sql} ORDER BY last_activity_at DESC LIMIT 100""", own_p):
             d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["id"])
             callbacks.append(d)
 
         # 2) Appointments to confirm / upcoming.
+        appt_own = " AND p.owner=?" if owner else ""
         appointments = []
         for r in conn.execute(
-            """SELECT a.id, a.scheduled_at, a.status, a.notes, a.agent,
+            f"""SELECT a.id, a.scheduled_at, a.status, a.notes, a.agent,
                       p.id person_id, p.full_name, p.city, p.birthday
                FROM appointments a JOIN people p ON p.id=a.person_id
-               WHERE a.status IN ('scheduled','kept') ORDER BY a.scheduled_at LIMIT 100"""):
+               WHERE a.status IN ('scheduled','kept'){appt_own} ORDER BY a.scheduled_at LIMIT 100""", own_p):
             d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["person_id"])
             appointments.append(d)
 
         # 3) Best leads to call next — not yet reached, not DNC, highest score first.
         call_next = []
         for r in conn.execute(
-            """SELECT p.id, p.full_name, p.city, p.county, p.birthday, p.source, p.owner,
+            f"""SELECT p.id, p.full_name, p.city, p.county, p.birthday, p.source, p.owner,
                       p.lead_score, p.stage, p.last_activity_at,
                       (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=p.id) call_count,
                       (SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id
                        ORDER BY dialed_at DESC LIMIT 1) last_outcome
                FROM people p
-               WHERE p.stage IN ('new','attempted','voicemail')
-               ORDER BY p.lead_score DESC, p.last_activity_at ASC LIMIT 60"""):
+               WHERE p.stage IN ('new','attempted','voicemail'){own_sql}
+               ORDER BY p.lead_score DESC, p.last_activity_at ASC LIMIT 60""", own_p):
             d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["id"])
             d["reason"] = ("Never called" if not d["call_count"]
                            else f"{d['call_count']}x · last: " + db.CATEGORY_LABELS.get(d["last_outcome"], d["last_outcome"] or "—"))
@@ -224,6 +228,7 @@ def api_leads():
                  "last_activity_at": "last_activity_at", "calls": "call_count"}
     order = sort_cols.get(sort, "last_activity_at")
 
+    owner = (request.args.get("owner") or "").strip().lower()
     where, params = [], []
     if q:
         where.append("(p.full_name LIKE ? OR ph.e164 LIKE ? OR p.city LIKE ?)")
@@ -231,6 +236,9 @@ def api_leads():
     if stage:
         where.append("p.stage=?")
         params.append(stage)
+    if owner:
+        where.append("p.owner=?")
+        params.append(owner)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     direction = "ASC" if order == "full_name" or order == "city" else "DESC"
 
@@ -330,6 +338,76 @@ def api_set_stage(pid):
 @app.route("/api/sync", methods=["POST"])
 def api_sync():
     return jsonify({"results": sync.sync_all()})
+
+
+@app.route("/api/export.csv")
+def api_export_csv():
+    """One-click export of the full lead book (respects the same filters as the
+    Lead Book) as a CSV the user can open in Excel."""
+    import csv
+    import io
+    stage = (request.args.get("stage") or "").strip()
+    q = (request.args.get("q") or "").strip()
+    where, params = [], []
+    if stage:
+        where.append("p.stage=?"); params.append(stage)
+    if q:
+        where.append("(p.full_name LIKE ? OR p.city LIKE ?)"); params += [f"%{q}%", f"%{q}%"]
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    cols = ["id", "full_name", "phone", "email", "age", "city", "county", "address",
+            "birthday", "source", "stage", "lead_score", "owner", "call_count",
+            "last_outcome", "last_activity_at"]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([c.replace("_", " ").title() for c in cols])
+    with db.connect() as conn:
+        rows = conn.execute(f"""
+            SELECT p.id, p.full_name, p.email, p.city, p.county, p.address, p.birthday,
+                   p.source, p.stage, p.lead_score, p.owner, p.last_activity_at,
+                   (SELECT e164 FROM phone_numbers x WHERE x.person_id=p.id LIMIT 1) phone,
+                   (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=p.id) call_count,
+                   (SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id
+                    ORDER BY dialed_at DESC LIMIT 1) last_outcome
+            FROM people p {clause} ORDER BY p.lead_score DESC LIMIT 20000""", params).fetchall()
+    for r in rows:
+        d = dict(r); d["age"] = _age(r["birthday"])
+        w.writerow([d.get(c, "") for c in cols])
+    fname = f"command_center_leads_{date.today().isoformat()}.csv"
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+@app.route("/api/import-csv", methods=["POST"])
+def api_import_csv():
+    """Drag-and-drop lead import from the dashboard. Accepts a CSV/XLSX upload,
+    routes it through the same agent-API import logic (dedup + suppression-safe)."""
+    import io
+    import pandas as pd
+    from agent_api import leads_import  # reuse the audited import path
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "no file"}), 400
+    source = (request.form.get("source") or os.path.splitext(f.filename or "import")[0]).strip()
+    owner = (request.form.get("owner") or "").strip()
+    raw = f.read()
+    try:
+        if (f.filename or "").lower().endswith((".xlsx", ".xls")):
+            df = pd.read_excel(io.BytesIO(raw), dtype=str, keep_default_na=False)
+        else:
+            df = pd.read_csv(io.BytesIO(raw), dtype=str, keep_default_na=False)
+    except Exception as exc:
+        return jsonify({"error": f"could not read file: {exc}"}), 400
+    alias = {"full name": "name", "first name": "first_name", "last name": "last_name",
+             "phone number": "phone", "mobile": "phone", "cell": "phone", "number": "phone",
+             "telephone": "phone", "dob": "birthday", "date of birth": "birthday",
+             "lead type": "lead_type", "email address": "email", "lead source": "source"}
+    df = df.rename(columns={c: alias.get(str(c).strip().lower(), str(c).strip().lower()) for c in df.columns})
+    leads = df.to_dict(orient="records")
+    # Call the agent_api import function directly with a synthetic request body.
+    with app.test_request_context(json={"source": source, "owner": owner, "leads": leads}):
+        resp = leads_import()
+    payload = resp.get_json() if hasattr(resp, "get_json") else resp
+    return jsonify(payload)
 
 
 @app.route("/api/ingest", methods=["POST"])

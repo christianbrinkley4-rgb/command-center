@@ -24,6 +24,11 @@
     <button class="tab" data-view="leads">Lead Book</button>
   </nav>
   <div class="topbar-right">
+    <div class="owner-toggle" id="ownerToggle">
+      <button class="ot active" data-owner="">All</button>
+      <button class="ot" data-owner="chris">Chris</button>
+      <button class="ot" data-owner="will">Will</button>
+    </div>
     <span class="sync-dot" id="syncDot"></span>
     <span class="sync-text" id="syncText">syncing…</span>
     <button class="btn-ghost" id="refreshBtn" title="Sync now">⟳</button>
@@ -98,6 +103,9 @@
       <div class="chips" id="stageChips"></div>
       <div class="spacer"></div>
       <span class="muted" id="leadCount"></span>
+      <button class="btn-pill" id="importBtn" title="Import a CSV/XLSX lead list">⬆ Import</button>
+      <button class="btn-pill" id="exportBtn" title="Download current view as CSV">⬇ Export</button>
+      <input type="file" id="importFile" accept=".csv,.xlsx,.xls" style="display:none">
     </div>
     <div class="table-wrap">
       <table class="leads-table">
@@ -123,6 +131,26 @@
     </div>
   </section>
 </main>
+
+<!-- appointment modal -->
+<div class="modal-overlay hidden" id="apptModal">
+  <div class="modal">
+    <div class="modal-title">Set Appointment</div>
+    <div class="modal-sub" id="apptFor"></div>
+    <label class="modal-label">Date &amp; time</label>
+    <input type="datetime-local" id="apptWhen">
+    <label class="modal-label">Which agent</label>
+    <select id="apptAgent"><option value="chris">Chris</option><option value="will">Will</option></select>
+    <label class="modal-label">Notes (optional)</label>
+    <input type="text" id="apptNotes" placeholder="e.g. in-office, bring spouse">
+    <div class="modal-actions">
+      <button class="btn btn-soft" id="apptCancel">Cancel</button>
+      <button class="btn btn-primary" id="apptSave">Save Appointment</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
 
 <script src="/static/app.js"></script>
 </body>

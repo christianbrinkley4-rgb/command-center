@@ -2,6 +2,17 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 let charts = {}, leadState = { q: "", stage: "", sort: "last_activity_at" }, currentLead = null, activeView = "today";
+let ownerFilter = "";  // "", "chris", or "will"
+
+/* ---------------- toast ---------------- */
+let toastTimer;
+function toast(msg, kind = "ok") {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "toast " + kind;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.add("hidden"), 3200);
+}
 
 const CAT_COLOR = {
   "Live Conversations": "#34d399", "Appointments": "#34d399", "Callbacks": "#22d3ee",
@@ -36,11 +47,20 @@ $$(".tab").forEach(t => t.onclick = () => {
   if (t.dataset.view === "leads") loadLeads();
 });
 $("#backBtn").onclick = () => showView("leads");
-$("#refreshBtn").onclick = async () => { await fetch("/api/sync", { method: "POST" }); refreshVisibleView(); };
+$("#refreshBtn").onclick = async () => { await fetch("/api/sync", { method: "POST" }); toast("Synced with dialers"); refreshVisibleView(); };
+
+/* ---------------- owner filter (Chris / Will / All) ---------------- */
+$$("#ownerToggle .ot").forEach(b => b.onclick = () => {
+  $$("#ownerToggle .ot").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  ownerFilter = b.dataset.owner;
+  refreshVisibleView();
+});
 
 /* ---------------- TODAY / action queue ---------------- */
 async function loadToday() {
-  const d = await (await fetch("/api/action-queue")).json();
+  const qs = ownerFilter ? "?owner=" + ownerFilter : "";
+  const d = await (await fetch("/api/action-queue" + qs)).json();
   const h = d.hero;
   $("#heroAppts").textContent = h.appointments_total;
   $("#heroApptsToday").textContent = h.appointments_today ? `+${h.appointments_today} today` : "none today yet";
@@ -63,6 +83,7 @@ async function loadToday() {
   $("#syncText").textContent = "synced " + d.synced_at;
 }
 function qRow(c, kind) {
+  (window._lastLeads = window._lastLeads || {})[c.id] = c.full_name || ("Lead #" + c.id);
   const where = [c.city, c.county ? c.county + " Co." : ""].filter(Boolean).join(", ");
   const meta = [c.age ? "Age " + c.age : "", where, c.reason || ""].filter(Boolean).join(" · ");
   return `<div class="q-row" onclick="openLead(${c.id})">
@@ -191,11 +212,37 @@ let searchTimer;
 $("#leadSearch").oninput = e => { clearTimeout(searchTimer); leadState.q = e.target.value; searchTimer = setTimeout(loadLeads, 220); };
 $$(".leads-table th[data-sort]").forEach(th => th.onclick = () => { leadState.sort = th.dataset.sort; loadLeads(); });
 
+/* export current view to CSV */
+$("#exportBtn").onclick = () => {
+  const p = new URLSearchParams({ q: leadState.q, stage: leadState.stage });
+  if (ownerFilter) p.set("owner", ownerFilter);
+  window.location = "/api/export.csv?" + p;
+  toast("Exporting leads to CSV…");
+};
+/* drag-and-drop / click import */
+$("#importBtn").onclick = () => $("#importFile").click();
+$("#importFile").onchange = async e => {
+  const file = e.target.files[0]; if (!file) return;
+  const source = prompt("Name this lead source (e.g. T65_June2026):", file.name.replace(/\.[^.]+$/, ""));
+  if (source === null) return;
+  const fd = new FormData(); fd.append("file", file); fd.append("source", source);
+  if (ownerFilter) fd.append("owner", ownerFilter);
+  toast("Importing " + file.name + "…");
+  const r = await fetch("/api/import-csv", { method: "POST", body: fd });
+  const j = await r.json();
+  if (j.error) toast("Import failed: " + j.error, "err");
+  else toast(`Imported ${j.imported} new · ${j.duplicates} dup · ${j.suppressed || 0} suppressed`, "ok");
+  e.target.value = "";
+  loadLeads();
+};
+
 async function loadLeads() {
   const p = new URLSearchParams({ q: leadState.q, stage: leadState.stage, sort: leadState.sort });
+  if (ownerFilter) p.set("owner", ownerFilter);
   const d = await (await fetch("/api/leads?" + p)).json();
   $("#leadCount").textContent = d.count + " leads";
   $("#leadsBody").innerHTML = d.leads.map(l => {
+    (window._lastLeads = window._lastLeads || {})[l.id] = l.full_name || ("Lead #" + l.id);
     const sc = l.lead_score >= 80 ? "#34d399" : l.lead_score >= 50 ? "#22d3ee" : "#64748b";
     return `<tr onclick="openLead(${l.id})">
       <td class="t-name">${esc(l.full_name || "Unknown")}</td>
@@ -252,18 +299,43 @@ function renderTL(t) {
 async function actNote(id) {
   const body = prompt("Add a note for this lead:"); if (!body) return;
   await fetch(`/api/lead/${id}/note`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body }) });
+  toast("Note added");
   if (currentLead === id) openLead(id);
-}
-async function actAppt(id) {
-  const when = prompt("Appointment date/time (e.g. 2026-06-03 2:00 PM):"); if (!when) return;
-  await fetch(`/api/lead/${id}/appointment`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scheduled_at: when }) });
-  if (currentLead === id) openLead(id); else loadToday();
 }
 async function actStage(id, stage) {
   if (stage === "dnc" && !confirm("Mark this lead Do Not Call and suppress their numbers?")) return;
   await fetch(`/api/lead/${id}/stage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ stage }) });
-  if (currentLead === id) openLead(id);
+  toast(stage === "dnc" ? "Marked Do Not Call" : "Marked " + stage);
+  if (currentLead === id) openLead(id); else refreshVisibleView();
 }
+
+/* ---------------- appointment modal ---------------- */
+let apptLeadId = null;
+function actAppt(id) {
+  apptLeadId = id;
+  const lead = (window._lastLeads || {})[id];
+  $("#apptFor").textContent = lead ? lead : "Lead #" + id;
+  // default to next business day 10am
+  const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(10, 0, 0, 0);
+  $("#apptWhen").value = new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  if (ownerFilter) $("#apptAgent").value = ownerFilter;
+  $("#apptNotes").value = "";
+  $("#apptModal").classList.remove("hidden");
+}
+$("#apptCancel").onclick = () => $("#apptModal").classList.add("hidden");
+$("#apptModal").onclick = e => { if (e.target.id === "apptModal") $("#apptModal").classList.add("hidden"); };
+$("#apptSave").onclick = async () => {
+  const when = $("#apptWhen").value;
+  if (!when) { toast("Pick a date & time", "err"); return; }
+  const pretty = new Date(when).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  await fetch(`/api/lead/${apptLeadId}/appointment`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scheduled_at: pretty, agent: $("#apptAgent").value, notes: $("#apptNotes").value })
+  });
+  $("#apptModal").classList.add("hidden");
+  toast("📅 Appointment set for " + pretty);
+  if (currentLead === apptLeadId) openLead(apptLeadId); else refreshVisibleView();
+};
 
 /* ---------------- boot ---------------- */
 function refreshVisibleView() {
@@ -272,5 +344,6 @@ function refreshVisibleView() {
   else if (activeView === "leads") loadLeads();
   else if (activeView === "lead" && currentLead) openLead(currentLead);
 }
+document.addEventListener("keydown", e => { if (e.key === "Escape") $("#apptModal").classList.add("hidden"); });
 loadToday();
 setInterval(refreshVisibleView, 15000);
