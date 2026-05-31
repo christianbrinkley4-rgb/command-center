@@ -18,8 +18,10 @@ from flask import Flask, jsonify, request, render_template, Response
 
 import db
 import sync
+from agent_api import agent_api, _ensure_columns as _agent_ensure_columns
 
 app = Flask(__name__)
+app.register_blueprint(agent_api)
 PORT = int(os.getenv("COMMAND_CENTER_PORT", "5055"))
 SYNC_INTERVAL = int(os.getenv("COMMAND_CENTER_SYNC_SECONDS", "30"))
 
@@ -38,6 +40,8 @@ def _require_auth():
         return  # health check is open for the load balancer
     if request.path == "/api/ingest":
         return  # protected separately by the ingest token (below)
+    if request.path.startswith("/agent/"):
+        return  # Agent API enforces its own bearer-token auth (CC_AGENT_TOKEN)
     if not CC_PASS:
         return  # no password configured => local-only mode, no lock
     auth = request.authorization
@@ -380,6 +384,10 @@ def start_background(initial=True):
         return
     _started = True
     db.init_db()
+    try:
+        _agent_ensure_columns()  # add people.email + messages.subject if missing
+    except Exception as exc:
+        print("column ensure warning:", exc)
     if initial:
         try:
             sync.sync_all()
