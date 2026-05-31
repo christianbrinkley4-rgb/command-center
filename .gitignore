@@ -10,3 +10,7 @@ data/
 DEPLOY_SECRETS.txt
 cloud_init.txt
 START_UPLOADER.cmd
+UPDATE_DROPLET.txt
+build/
+dist/
+*.spec
