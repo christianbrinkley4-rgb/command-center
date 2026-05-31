@@ -37,6 +37,7 @@ WorkingDirectory=$APP_DIR
 Environment=CC_USERNAME=$CC_USERNAME
 Environment=CC_PASSWORD=$CC_PASSWORD
 Environment=CC_INGEST_TOKEN=$CC_INGEST_TOKEN
+Environment=CC_AGENT_TOKEN=$CC_AGENT_TOKEN
 Environment=CC_DATA_DIR=$DATA_DIR
 Environment=COMMAND_CENTER_PORT=$PORT
 ExecStart=$APP_DIR/venv/bin/gunicorn -w 1 -b 127.0.0.1:$PORT app:app

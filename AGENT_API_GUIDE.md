@@ -28,10 +28,11 @@ POST /agent/leads/import
 { "source":"T65_June2026", "owner":"chris",
   "leads":[ {"name":"Jane Doe","phone":"3365550101","city":"Greensboro",
              "county":"Guilford","birthday":"1962-03-04","email":"jane@x.com"} ] }
--> { "imported":1, "duplicates":0, "person_ids":[123] }
+-> { "imported":1, "duplicates":0, "suppressed":0, "person_ids":[123] }
 ```
 New leads land under stage `new`. Duplicates (same name+city+birthday, or same phone)
-are auto-detected and enriched — never doubled.
+are auto-detected and enriched — never doubled. Any number previously opted-out/DNC is
+**skipped on import** and counted in `suppressed` (a re-pulled list never resurrects a STOP).
 
 ## 2) Call agent — work the best leads, push winners up
 ```
@@ -50,10 +51,11 @@ GET  /agent/leads/outreach-queue?channel=email&source=T65_June2026
      last_call_outcome, times_messaged) to personalize. Opt-outs excluded automatically.
 POST /agent/messages/log  { "person_id":123,"channel":"email","subject":"Your Medicare options",
                             "body":"Hi Jane...","template_id":"t65_intro","status":"sent" }
-POST /agent/leads/opt-out { "person_id":123,"reason":"opt_out" }
+POST /agent/leads/opt-out { "phone":"3365550101","reason":"opt_out" }   # or person_id, or email
 ```
 Always honor STOP/unsubscribe via `/opt-out` — it suppresses the person across all channels
-and marks DNC, so no agent contacts them again.
+and marks DNC, so no agent contacts them again. Accepts **person_id, phone, OR email** (a STOP
+text only gives you a number); a STOP from an unknown number is still recorded so it's never texted.
 
 ## Bulk export (any agent / analytics)
 ```

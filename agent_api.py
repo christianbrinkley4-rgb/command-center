@@ -144,7 +144,7 @@ def leads_import():
     if not isinstance(leads, list) or not leads:
         return jsonify({"error": "send a non-empty 'leads' array"}), 400
 
-    imported, duplicates, person_ids = 0, 0, []
+    imported, duplicates, suppressed, person_ids = 0, 0, 0, []
     with db.connect() as conn:
         if source:
             conn.execute("INSERT OR IGNORE INTO lead_sources(name, first_seen_at) VALUES (?,?)", (source, _now()))
@@ -155,6 +155,12 @@ def leads_import():
             phone = db.normalize_phone(lead.get("phone") or lead.get("mobile") or lead.get("number"))
             key = db.person_key(name, city, birthday) or (f"phone|{phone}" if phone else "")
             if not key:
+                continue
+
+            # Never resurrect an opted-out / DNC number from a freshly pulled list.
+            if phone and conn.execute(
+                    "SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (phone,)).fetchone():
+                suppressed += 1
                 continue
 
             row = conn.execute("SELECT id FROM people WHERE person_key=?", (key,)).fetchone()
@@ -183,11 +189,13 @@ def leads_import():
                 conn.execute("INSERT OR IGNORE INTO phone_numbers(person_id, e164, created_at) VALUES (?,?,?)",
                              (pid, phone, _now()))
             person_ids.append(pid)
-        db.audit(conn, "import", source or "batch", "leads_imported", f"+{imported} new, {duplicates} dup")
+        db.audit(conn, "import", source or "batch", "leads_imported",
+                 f"+{imported} new, {duplicates} dup, {suppressed} suppressed")
         if source:
             conn.execute("UPDATE lead_sources SET lead_count=(SELECT COUNT(*) FROM people WHERE source=?) WHERE name=?",
                          (source, source))
-    return jsonify({"imported": imported, "duplicates": duplicates, "person_ids": person_ids})
+    return jsonify({"imported": imported, "duplicates": duplicates,
+                    "suppressed": suppressed, "person_ids": person_ids})
 
 
 # ------------------------------------------------------------------ ensure schema extras
@@ -355,20 +363,37 @@ def messages_log():
 
 @agent_api.route("/agent/leads/opt-out", methods=["POST"])
 def leads_opt_out():
+    """Honor STOP/unsubscribe. Accepts person_id OR phone OR email — because a STOP
+    text arrives from a phone number and an unsubscribe from an email, not an id."""
     d = request.get_json(silent=True) or {}
     pid = d.get("person_id")
-    if not pid:
-        return jsonify({"error": "person_id required"}), 400
+    phone = db.normalize_phone(d.get("phone"))
+    email = _clean(d.get("email")).lower()
     reason = _clean(d.get("reason")) or "opt_out"
     with db.connect() as conn:
+        if not pid and phone:
+            row = conn.execute("SELECT person_id FROM phone_numbers WHERE e164=?", (phone,)).fetchone()
+            pid = row["person_id"] if row else None
+        if not pid and email:
+            row = conn.execute("SELECT id FROM people WHERE lower(email)=?", (email,)).fetchone()
+            pid = row["id"] if row else None
+        if not pid:
+            # Still record the phone-level suppression so we never text it, even if
+            # we can't match a person (e.g. STOP from a number not in our DB yet).
+            if phone:
+                conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
+                             (phone, reason, _now()))
+                db.audit(conn, "phone", phone, "opted_out_unmatched", reason)
+                return jsonify({"ok": True, "matched_person": False})
+            return jsonify({"error": "person_id, phone, or email required"}), 400
         conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('person',?,?,?)",
                      (str(pid), reason, _now()))
         for r in conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=?", (pid,)):
             conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
                          (r["e164"], reason, _now()))
-        conn.execute("UPDATE people SET stage='dnc' WHERE id=?", (pid,))
+        conn.execute("UPDATE people SET stage='dnc', last_activity_at=? WHERE id=?", (_now(), pid))
         db.audit(conn, "person", pid, "opted_out", reason)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "matched_person": True, "person_id": pid})
 
 
 # ------------------------------------------------------------------ bulk export
