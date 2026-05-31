@@ -1,7 +1,7 @@
 /* Command Center dashboard */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-let charts = {}, leadState = { q: "", stage: "", sort: "last_activity_at" }, currentLead = null;
+let charts = {}, leadState = { q: "", stage: "", sort: "last_activity_at" }, currentLead = null, activeView = "today";
 
 const CAT_COLOR = {
   "Live Conversations": "#34d399", "Appointments": "#34d399", "Callbacks": "#22d3ee",
@@ -9,6 +9,7 @@ const CAT_COLOR = {
   "Bad / Dead / Spam": "#f87171", "Not Interested": "#fbbf24", "Do Not Call": "#f87171", "Other": "#8497ad",
 };
 const esc = s => (s ?? "").toString().replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const initials = n => (n || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase();
 
 function fmtClock(iso) {
   if (!iso) return "";
@@ -19,19 +20,76 @@ function fmtClock(iso) {
                : d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 function fmtTalk(s) { s = Math.round(s || 0); return s ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` : "—"; }
+function telLink(p) { return p ? `<a class="tel" href="tel:${esc(p)}" onclick="event.stopPropagation()">${esc(p)}</a>` : ""; }
 
 /* ---------------- navigation ---------------- */
 function showView(v) {
+  activeView = v;
   $$(".view").forEach(el => el.classList.add("hidden"));
   $("#view-" + v).classList.remove("hidden");
   $$(".tab").forEach(t => t.classList.toggle("active", t.dataset.view === v));
 }
-$$(".tab").forEach(t => t.onclick = () => { showView(t.dataset.view); if (t.dataset.view === "leads") loadLeads(); });
+$$(".tab").forEach(t => t.onclick = () => {
+  showView(t.dataset.view);
+  if (t.dataset.view === "today") loadToday();
+  if (t.dataset.view === "analytics") loadAnalytics();
+  if (t.dataset.view === "leads") loadLeads();
+});
 $("#backBtn").onclick = () => showView("leads");
-$("#refreshBtn").onclick = async () => { await fetch("/api/sync", { method: "POST" }); loadOverview(); if (!$("#view-leads").classList.contains("hidden")) loadLeads(); };
+$("#refreshBtn").onclick = async () => { await fetch("/api/sync", { method: "POST" }); refreshVisibleView(); };
 
-/* ---------------- overview ---------------- */
-async function loadOverview() {
+/* ---------------- TODAY / action queue ---------------- */
+async function loadToday() {
+  const d = await (await fetch("/api/action-queue")).json();
+  const h = d.hero;
+  $("#heroAppts").textContent = h.appointments_total;
+  $("#heroApptsToday").textContent = h.appointments_today ? `+${h.appointments_today} today` : "none today yet";
+  $("#heroMinis").innerHTML = [
+    ["Live Today", h.live_today, "c-live"],
+    ["Calls Today", h.calls_today, "c-call2"],
+    ["Callbacks Due", h.callbacks_due, "c-callback"],
+  ].map(([l, v, c]) => `<div class="mini ${c}"><div class="mini-val">${v}</div><div class="mini-label">${l}</div></div>`).join("");
+
+  $("#cbCount").textContent = d.callbacks.length;
+  $("#apCount").textContent = d.appointments.length;
+  $("#cnCount").textContent = d.call_next.length;
+
+  $("#callbackList").innerHTML = d.callbacks.map(c => qRow(c, "callback")).join("")
+    || emptyState("No callbacks due", "When someone asks for a callback, they show up here first.");
+  $("#apptList").innerHTML = d.appointments.map(apptRow).join("")
+    || emptyState("No appointments yet", "Set one from any lead and it appears here.");
+  $("#callNextList").innerHTML = d.call_next.map(c => qRow(c, "next")).join("")
+    || emptyState("Queue clear", "No un-reached leads right now.");
+  $("#syncText").textContent = "synced " + d.synced_at;
+}
+function qRow(c, kind) {
+  const where = [c.city, c.county ? c.county + " Co." : ""].filter(Boolean).join(", ");
+  const meta = [c.age ? "Age " + c.age : "", where, c.reason || ""].filter(Boolean).join(" · ");
+  return `<div class="q-row" onclick="openLead(${c.id})">
+    <div class="q-av">${esc(initials(c.full_name))}</div>
+    <div class="q-main">
+      <div class="q-name">${esc(c.full_name || "Unknown")} <span class="q-score">${c.lead_score}</span></div>
+      <div class="q-meta">${esc(meta)}</div>
+    </div>
+    <div class="q-right">${telLink(c.phone)}
+      <button class="q-btn" onclick="event.stopPropagation();actAppt(${c.id})">Set Appt</button>
+    </div></div>`;
+}
+function apptRow(a) {
+  return `<div class="q-row" onclick="openLead(${a.person_id})">
+    <div class="q-av appt">${esc(initials(a.full_name))}</div>
+    <div class="q-main">
+      <div class="q-name">${esc(a.full_name || "Unknown")}</div>
+      <div class="q-meta">${esc(a.scheduled_at || "time TBD")}${a.agent ? " · " + esc(a.agent) : ""}${a.notes ? " · " + esc(a.notes) : ""}</div>
+    </div>
+    <div class="q-right">${telLink(a.phone)}<span class="badge b-appointment">${esc(a.status)}</span></div></div>`;
+}
+function emptyState(title, sub) {
+  return `<div class="empty"><div class="empty-t">${esc(title)}</div><div class="empty-s">${esc(sub)}</div></div>`;
+}
+
+/* ---------------- ANALYTICS ---------------- */
+async function loadAnalytics() {
   const d = await (await fetch("/api/overview")).json();
   renderKPIs(d.kpis);
   renderTrend(d.by_day); renderDonut(d.categories); renderHour(d.by_hour);
@@ -39,17 +97,14 @@ async function loadOverview() {
   $("#syncText").textContent = "synced " + d.synced_at;
   $("#activityMuted").textContent = d.recent.length + " most recent";
 }
-
 function renderKPIs(k) {
   const cards = [
-    ["k-blue", k.total_leads, "Total Leads", ""],
-    ["k-cyan", k.total_calls, "Total Calls", ""],
-    ["k-green", k.live_conversations, "Live Conversations", k.contact_rate + "% contact rate"],
     ["k-green", k.appointments, "Appointments", ""],
+    ["k-green", k.live_conversations, "Live Conversations", k.contact_rate + "% contact rate"],
     ["k-cyan", k.callbacks_pending, "Callbacks Pending", ""],
     ["k-cyan", fmtTalk(k.avg_talk_seconds), "Avg Talk Time", ""],
-    ["k-blue", k.today_calls, "Calls Today", ""],
-    ["k-green", k.today_live, "Live Today", ""],
+    ["k-blue", k.total_leads, "Total Leads", ""],
+    ["k-cyan", k.total_calls, "Total Calls", ""],
     ["k-blue", k.voicemails, "Voicemail / Machine", ""],
     ["k-amber", k.no_answers, "No Answer / Busy", ""],
     ["k-red", k.bad_numbers, "Bad / Dead / Spam", ""],
@@ -64,9 +119,8 @@ Chart.defaults.font.family = "Inter, sans-serif";
 Chart.defaults.borderColor = "#1f2b3d";
 
 function renderTrend(byDay) {
-  const ctx = $("#chartTrend");
   charts.trend?.destroy();
-  charts.trend = new Chart(ctx, {
+  charts.trend = new Chart($("#chartTrend"), {
     type: "line",
     data: {
       labels: byDay.map(d => d.day),
@@ -164,7 +218,7 @@ async function openLead(id) {
     <div class="cc-name">${esc(p.full_name || "Unknown")}</div>
     <div class="cc-meta">${esc(p.city || "")}${p.county ? ", " + esc(p.county) + " Co." : ""} ${p.age ? "· Age " + p.age : ""}</div>
     <div style="margin:14px 0"><span class="badge b-${p.stage}">${esc(p.stage)}</span> <span class="score-pill" style="background:#22d3ee22;color:#22d3ee">Score ${p.lead_score}</span></div>
-    ${p.phones.map(ph => `<div class="cc-row"><span class="l">Phone</span><span class="v">${esc(ph.e164)}</span></div>`).join("")}
+    ${(p.phones || []).map(ph => `<div class="cc-row"><span class="l">Phone</span><span class="v">${telLink(ph.e164)}</span></div>`).join("")}
     ${p.address ? `<div class="cc-row"><span class="l">Address</span><span class="v">${esc(p.address)}</span></div>` : ""}
     <div class="cc-row"><span class="l">Birthday</span><span class="v">${esc(p.birthday || "—")}</span></div>
     <div class="cc-row"><span class="l">Source</span><span class="v">${esc(p.source || "—")}</span></div>
@@ -198,19 +252,25 @@ function renderTL(t) {
 async function actNote(id) {
   const body = prompt("Add a note for this lead:"); if (!body) return;
   await fetch(`/api/lead/${id}/note`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body }) });
-  openLead(id);
+  if (currentLead === id) openLead(id);
 }
 async function actAppt(id) {
   const when = prompt("Appointment date/time (e.g. 2026-06-03 2:00 PM):"); if (!when) return;
   await fetch(`/api/lead/${id}/appointment`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scheduled_at: when }) });
-  openLead(id);
+  if (currentLead === id) openLead(id); else loadToday();
 }
 async function actStage(id, stage) {
   if (stage === "dnc" && !confirm("Mark this lead Do Not Call and suppress their numbers?")) return;
   await fetch(`/api/lead/${id}/stage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ stage }) });
-  openLead(id);
+  if (currentLead === id) openLead(id);
 }
 
 /* ---------------- boot ---------------- */
-loadOverview();
-setInterval(() => { if (!$("#view-overview").classList.contains("hidden")) loadOverview(); }, 15000);
+function refreshVisibleView() {
+  if (activeView === "today") loadToday();
+  else if (activeView === "analytics") loadAnalytics();
+  else if (activeView === "leads") loadLeads();
+  else if (activeView === "lead" && currentLead) openLead(currentLead);
+}
+loadToday();
+setInterval(refreshVisibleView, 15000);

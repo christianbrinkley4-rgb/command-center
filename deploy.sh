@@ -39,7 +39,7 @@ Environment=CC_PASSWORD=$CC_PASSWORD
 Environment=CC_INGEST_TOKEN=$CC_INGEST_TOKEN
 Environment=CC_DATA_DIR=$DATA_DIR
 Environment=COMMAND_CENTER_PORT=$PORT
-ExecStart=$APP_DIR/venv/bin/gunicorn -w 2 -b 127.0.0.1:$PORT app:app
+ExecStart=$APP_DIR/venv/bin/gunicorn -w 1 -b 127.0.0.1:$PORT app:app
 Restart=always
 [Install]
 WantedBy=multi-user.target

@@ -7,3 +7,6 @@ __pycache__/
 data/
 .env
 *.xlsx
+DEPLOY_SECRETS.txt
+cloud_init.txt
+START_UPLOADER.cmd

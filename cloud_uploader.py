@@ -19,17 +19,24 @@ CLOUD_URL = os.getenv("CC_CLOUD_URL", "").rstrip("/")
 TOKEN = os.getenv("CC_INGEST_TOKEN", "")
 INTERVAL = int(os.getenv("CC_UPLOAD_SECONDS", "60"))
 
-# (agent, local results file). Mirrors the dialers' real output locations.
-UPLOADS = [
+DEFAULT_UPLOADS = [
     ("chris", r"C:\dialer\MyDialer_TODAY_READY\MyDialer\dial_results.xlsx"),
     ("will",  r"C:\Users\chris\OneDrive\Documents\Dialer\Will_Dialer\dial_results.xlsx"),
 ]
 
 
+def configured_uploads():
+    agent = os.getenv("CC_UPLOAD_AGENT", "").strip()
+    path = os.getenv("CC_RESULTS_FILE", "").strip()
+    if agent and path:
+        return [(agent, path)]
+    return DEFAULT_UPLOADS
+
+
 def push_once():
     if not CLOUD_URL or not TOKEN:
         print("Set CC_CLOUD_URL and CC_INGEST_TOKEN first."); return
-    for agent, path in UPLOADS:
+    for agent, path in configured_uploads():
         if not os.path.exists(path):
             continue
         try:
@@ -48,6 +55,9 @@ def push_once():
 
 def main():
     print(f"Command Center uploader -> {CLOUD_URL or '(unset)'} every {INTERVAL}s")
+    if os.getenv("CC_UPLOAD_ONCE", "").lower() in {"1", "true", "yes"}:
+        push_once()
+        return
     while True:
         push_once()
         time.sleep(INTERVAL)

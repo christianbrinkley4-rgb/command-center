@@ -147,6 +147,68 @@ def api_overview():
     })
 
 
+# ----------------------------- API: action queue -----------------------------
+
+@app.route("/api/action-queue")
+def api_action_queue():
+    """The daily driver: what to do next to book appointments.
+    Three buckets — callbacks due (warmest), appointments to confirm, and the
+    prioritized 'call next' list (best-scoring leads not yet reached)."""
+    today = date.today().isoformat()
+    with db.connect() as conn:
+        def phone_of(pid):
+            r = conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=? LIMIT 1", (pid,)).fetchone()
+            return r["e164"] if r else ""
+
+        # 1) Callbacks the prospect asked for — top priority.
+        callbacks = []
+        for r in conn.execute(
+            """SELECT id, full_name, city, county, birthday, owner, lead_score, last_activity_at
+               FROM people WHERE stage='callback' ORDER BY last_activity_at DESC LIMIT 100"""):
+            d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["id"])
+            callbacks.append(d)
+
+        # 2) Appointments to confirm / upcoming.
+        appointments = []
+        for r in conn.execute(
+            """SELECT a.id, a.scheduled_at, a.status, a.notes, a.agent,
+                      p.id person_id, p.full_name, p.city, p.birthday
+               FROM appointments a JOIN people p ON p.id=a.person_id
+               WHERE a.status IN ('scheduled','kept') ORDER BY a.scheduled_at LIMIT 100"""):
+            d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["person_id"])
+            appointments.append(d)
+
+        # 3) Best leads to call next — not yet reached, not DNC, highest score first.
+        call_next = []
+        for r in conn.execute(
+            """SELECT p.id, p.full_name, p.city, p.county, p.birthday, p.source, p.owner,
+                      p.lead_score, p.stage, p.last_activity_at,
+                      (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=p.id) call_count,
+                      (SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id
+                       ORDER BY dialed_at DESC LIMIT 1) last_outcome
+               FROM people p
+               WHERE p.stage IN ('new','attempted','voicemail')
+               ORDER BY p.lead_score DESC, p.last_activity_at ASC LIMIT 60"""):
+            d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["id"])
+            d["reason"] = ("Never called" if not d["call_count"]
+                           else f"{d['call_count']}x · last: " + db.CATEGORY_LABELS.get(d["last_outcome"], d["last_outcome"] or "—"))
+            call_next.append(d)
+
+        hero = {
+            "appointments_total": conn.execute("SELECT COUNT(*) n FROM appointments").fetchone()["n"],
+            "appointments_today": conn.execute(
+                "SELECT COUNT(*) n FROM appointments WHERE substr(created_at,1,10)=?", (today,)).fetchone()["n"],
+            "live_today": conn.execute(
+                "SELECT COUNT(*) n FROM call_attempts WHERE substr(dialed_at,1,10)=? AND disposition_category='live_conversation'",
+                (today,)).fetchone()["n"],
+            "calls_today": conn.execute(
+                "SELECT COUNT(*) n FROM call_attempts WHERE substr(dialed_at,1,10)=?", (today,)).fetchone()["n"],
+            "callbacks_due": len(callbacks),
+        }
+    return jsonify({"hero": hero, "callbacks": callbacks, "appointments": appointments,
+                    "call_next": call_next, "synced_at": datetime.now().strftime("%I:%M:%S %p")})
+
+
 # ----------------------------- API: leads -----------------------------
 
 @app.route("/api/leads")
@@ -307,13 +369,33 @@ def _background_sync():
         time.sleep(SYNC_INTERVAL)
 
 
-def main():
+_started = False
+
+
+def start_background(initial=True):
+    """Initialize the DB and launch the sync loop. Runs once, whether started by
+    gunicorn (on import) or by `python app.py` directly."""
+    global _started
+    if _started:
+        return
+    _started = True
     db.init_db()
-    try:
-        sync.sync_all()
-    except Exception as exc:
-        print("initial sync warning:", exc)
+    if initial:
+        try:
+            sync.sync_all()
+        except Exception as exc:
+            print("initial sync warning:", exc)
     threading.Thread(target=_background_sync, daemon=True).start()
+
+
+# Start on import so production servers (gunicorn app:app) initialize correctly.
+# Opt out with CC_NO_AUTOSTART=1 (used by the test suite).
+if os.getenv("CC_NO_AUTOSTART", "") not in ("1", "true", "yes"):
+    start_background()
+
+
+def main():
+    start_background()
     print(f"\n  Command Center  ->  http://localhost:{PORT}\n")
     app.run(host="0.0.0.0", port=PORT, use_reloader=False)
 

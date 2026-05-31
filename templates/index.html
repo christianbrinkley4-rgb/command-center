@@ -19,7 +19,8 @@
     </div>
   </div>
   <nav class="tabs">
-    <button class="tab active" data-view="overview">Overview</button>
+    <button class="tab active" data-view="today">Today</button>
+    <button class="tab" data-view="analytics">Analytics</button>
     <button class="tab" data-view="leads">Lead Book</button>
   </nav>
   <div class="topbar-right">
@@ -30,10 +31,36 @@
 </header>
 
 <main>
-  <!-- ============ OVERVIEW ============ -->
-  <section id="view-overview" class="view">
-    <div class="kpi-grid" id="kpiGrid"></div>
+  <!-- ============ TODAY / ACTION QUEUE ============ -->
+  <section id="view-today" class="view">
+    <div class="hero-strip">
+      <div class="hero-card">
+        <div class="hero-val" id="heroAppts">—</div>
+        <div class="hero-label">Appointments Set</div>
+        <div class="hero-sub" id="heroApptsToday"></div>
+      </div>
+      <div class="hero-mini" id="heroMinis"></div>
+    </div>
 
+    <div class="queue-grid">
+      <div class="queue-col">
+        <div class="queue-head"><span class="qh-dot c-callback"></span><h3>Callbacks Due</h3><span class="qh-count" id="cbCount">0</span></div>
+        <div class="queue-list" id="callbackList"></div>
+      </div>
+      <div class="queue-col">
+        <div class="queue-head"><span class="qh-dot c-appt"></span><h3>Appointments</h3><span class="qh-count" id="apCount">0</span></div>
+        <div class="queue-list" id="apptList"></div>
+      </div>
+      <div class="queue-col queue-col-wide">
+        <div class="queue-head"><span class="qh-dot c-call"></span><h3>Call Next — Best Leads</h3><span class="qh-count" id="cnCount">0</span></div>
+        <div class="queue-list" id="callNextList"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ANALYTICS ============ -->
+  <section id="view-analytics" class="view hidden">
+    <div class="kpi-grid" id="kpiGrid"></div>
     <div class="panel-row">
       <div class="panel panel-wide">
         <div class="panel-head"><h3>Calls &amp; Live Conversations — last 14 days</h3></div>
@@ -44,7 +71,6 @@
         <canvas id="chartDonut" height="180"></canvas>
       </div>
     </div>
-
     <div class="panel-row">
       <div class="panel">
         <div class="panel-head"><h3>Today by Hour</h3></div>
@@ -59,9 +85,8 @@
         <div id="perAgent" class="agent-list"></div>
       </div>
     </div>
-
     <div class="panel">
-      <div class="panel-head"><h3>Live Activity</h3><span class="muted" id="activityMuted"></span></div>
+      <div class="panel-head"><h3>Recent Activity</h3><span class="muted" id="activityMuted"></span></div>
       <div class="activity" id="activity"></div>
     </div>
   </section>
@@ -88,7 +113,7 @@
 
   <!-- ============ LEAD DETAIL ============ -->
   <section id="view-lead" class="view hidden">
-    <button class="btn-ghost back" id="backBtn">← Back to Lead Book</button>
+    <button class="btn-ghost back" id="backBtn">← Back</button>
     <div class="lead-detail">
       <aside class="contact-card" id="contactCard"></aside>
       <div class="timeline-wrap">
