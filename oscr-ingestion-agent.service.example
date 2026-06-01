@@ -1,0 +1,19 @@
+[Unit]
+Description=Command Center OSCR Lead Ingestion Agent
+After=network-online.target command-center.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/command_center
+EnvironmentFile=/opt/command_center/.env.oscr
+ExecStart=/opt/command_center/venv/bin/python /opt/command_center/oscr_ingestion_agent.py
+Restart=always
+RestartSec=10
+# Optional hardening: set User=/Group= to a dedicated account after giving that
+# account read/write access to /opt/command_center and command_center.db.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

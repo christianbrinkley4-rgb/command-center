@@ -349,11 +349,22 @@ def api_add_appointment(pid):
     data = request.json or {}
     now = datetime.now().isoformat(timespec="seconds")
     with db.connect() as conn:
+        if data.get("replace"):
+            conn.execute("""UPDATE appointments SET status='cancelled',
+                            notes=COALESCE(NULLIF(notes,''),'') || ?
+                            WHERE person_id=? AND status='scheduled'""",
+                         (f"\n[{now}] Replaced by new appointment time", pid))
+            try:
+                import automation
+                automation.cancel_pending(conn, pid, "appointment_replaced")
+            except Exception:
+                pass
         conn.execute(
             "INSERT INTO appointments(person_id, agent, scheduled_at, notes, status, created_at) VALUES (?,?,?,?, 'scheduled', ?)",
             (pid, data.get("agent", ""), data.get("scheduled_at", ""), data.get("notes", ""), now))
         conn.execute("UPDATE people SET stage='appointment', last_activity_at=? WHERE id=?", (now, pid))
-        db.audit(conn, "person", pid, "appointment_set", data.get("scheduled_at", ""))
+        db.audit(conn, "person", pid, "appointment_replaced" if data.get("replace") else "appointment_set",
+                 data.get("scheduled_at", ""))
         # Auto-schedule reminder texts (24h before + morning-of) when we can parse the time.
         try:
             import automation
@@ -374,6 +385,13 @@ def _parse_appt_dt(text):
         return None
 
 
+def _stage_after_cancelled_appointment(conn, pid):
+    had_contact = conn.execute("""SELECT 1 FROM call_attempts
+        WHERE person_id=? AND disposition_category IN ('live_conversation','callback') LIMIT 1""",
+        (pid,)).fetchone()
+    return "callback" if had_contact else "attempted"
+
+
 @app.route("/api/lead/<int:pid>/appointment-outcome", methods=["POST"])
 def api_appointment_outcome(pid):
     """Mark the most recent appointment kept / no-show / cancelled. A no-show auto-
@@ -383,7 +401,7 @@ def api_appointment_outcome(pid):
         return jsonify({"error": "bad outcome"}), 400
     now = datetime.now().isoformat(timespec="seconds")
     with db.connect() as conn:
-        row = conn.execute("SELECT id, agent FROM appointments WHERE person_id=? ORDER BY created_at DESC LIMIT 1",
+        row = conn.execute("SELECT id, agent FROM appointments WHERE person_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
                            (pid,)).fetchone()
         if row:
             conn.execute("UPDATE appointments SET status=? WHERE id=?", (outcome, row["id"]))
@@ -398,6 +416,17 @@ def api_appointment_outcome(pid):
                                          automation._phone_of(conn, pid), "",
                                          row["agent"] if row else "")
                 conn.execute("UPDATE people SET stage='callback' WHERE id=?", (pid,))
+            except Exception:
+                pass
+        elif outcome == "cancelled":
+            new_stage = _stage_after_cancelled_appointment(conn, pid)
+            conn.execute("UPDATE people SET stage=?, last_activity_at=? WHERE id=?", (new_stage, now, pid))
+            conn.execute("""INSERT INTO person_notes(person_id, body, author, created_at)
+                            VALUES (?,?,?,?)""",
+                         (pid, f"Appointment cancelled -> stage={new_stage}", "agent", now))
+            try:
+                import automation
+                automation.cancel_pending(conn, pid, "appointment_cancelled")
             except Exception:
                 pass
         db.audit(conn, "person", pid, "appointment_outcome", outcome)

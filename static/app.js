@@ -486,7 +486,9 @@ async function openLead(id) {
     <div class="cc-actions">
       <button class="btn btn-primary" onclick="actAppt(${id})">＋ Set Appointment</button>
       ${p.stage === 'appointment' ? `<button class="btn btn-soft" onclick="apptOutcome(${id},'kept')">✓ Appt Kept</button>
-        <button class="btn btn-soft" onclick="apptOutcome(${id},'no_show')">✗ No-Show</button>` : ''}
+        <button class="btn btn-soft" onclick="apptOutcome(${id},'no_show')">✗ No-Show</button>
+        <button class="btn btn-soft" onclick="actAppt(${id}, true)">Switch Appointment</button>
+        <button class="btn btn-danger" onclick="apptOutcome(${id},'cancelled')">Cancel Appointment</button>` : ''}
       <button class="btn btn-win" onclick="logDeal(${id})">💼 Log Deal / Sale</button>
       <button class="btn btn-soft" onclick="actNote(${id})">＋ Add Note</button>
       <button class="btn btn-soft" onclick="previewMsg(${id})">✉ Preview Message</button>
@@ -541,8 +543,9 @@ async function actStage(id, stage) {
   if (currentLead === id) openLead(id); else refreshVisibleView();
 }
 async function apptOutcome(id, outcome) {
+  if (outcome === "cancelled" && !confirm("Cancel this appointment and move the lead back into the active queue?")) return;
   await fetch(`/api/lead/${id}/appointment-outcome`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ outcome }) });
-  toast(outcome === "kept" ? "Appointment kept ✓" : outcome === "no_show" ? "No-show — follow-up auto-scheduled" : "Cancelled");
+  toast(outcome === "kept" ? "Appointment kept ✓" : outcome === "no_show" ? "No-show — follow-up auto-scheduled" : "Appointment cancelled");
   if (currentLead === id) openLead(id);
 }
 async function logDeal(id) {
@@ -559,9 +562,12 @@ async function logDeal(id) {
 
 /* ---------------- appointment modal ---------------- */
 let apptLeadId = null;
-function actAppt(id) {
+let apptReplace = false;
+function actAppt(id, replace = false) {
   apptLeadId = id;
+  apptReplace = !!replace;
   const lead = (window._lastLeads || {})[id];
+  $(".modal-title", $("#apptModal")).textContent = apptReplace ? "Switch Appointment" : "Set Appointment";
   $("#apptFor").textContent = lead ? lead : "Lead #" + id;
   // default to next business day 10am
   const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(10, 0, 0, 0);
@@ -578,10 +584,10 @@ $("#apptSave").onclick = async () => {
   const pretty = new Date(when).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   await fetch(`/api/lead/${apptLeadId}/appointment`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scheduled_at: pretty, agent: $("#apptAgent").value, notes: $("#apptNotes").value })
+    body: JSON.stringify({ scheduled_at: pretty, agent: $("#apptAgent").value, notes: $("#apptNotes").value, replace: apptReplace })
   });
   $("#apptModal").classList.add("hidden");
-  toast("📅 Appointment set for " + pretty);
+  toast((apptReplace ? "Appointment switched to " : "📅 Appointment set for ") + pretty);
   if (currentLead === apptLeadId) openLead(apptLeadId); else refreshVisibleView();
 };
 
