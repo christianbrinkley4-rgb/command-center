@@ -610,6 +610,74 @@ def api_insights():
     return jsonify(learning.get_stats())
 
 
+@app.route("/api/dialer-queue")
+def api_dialer_queue():
+    """The single source of truth for call order. The dialer pulls this exact ranked
+    list so the dashboard's order and the dialer's order ALWAYS match. Same priority
+    as the Today view: scheduled-calls-due > callbacks > hot fresh > new(by score) >
+    retry. Excludes DNC/suppressed/reached/future-held."""
+    owner = (request.args.get("owner") or "").strip().lower()
+    limit = min(int(request.args.get("limit", 1000)), 5000)
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    cutoff_24h = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
+    own = " AND p.owner=?" if owner else ""
+    own_p = [owner] if owner else []
+    rows, seen = [], set()
+    with db.connect() as conn:
+        def phone_of(pid):
+            r = conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=? AND status<>'bad' "
+                             "ORDER BY status='active' DESC LIMIT 1", (pid,)).fetchone()
+            return r["e164"] if r else ""
+        def suppressed(e):
+            return conn.execute("SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (e,)).fetchone() is not None
+
+        # future-held: a scheduled call later than now -> keep out of today's list
+        held = {r["person_id"] for r in conn.execute(
+            "SELECT DISTINCT person_id FROM scheduled_tasks WHERE kind='call' AND status='pending' AND due_at>?", (now_iso,))}
+        due = {r["person_id"] for r in conn.execute(
+            "SELECT DISTINCT person_id FROM scheduled_tasks WHERE kind='call' AND status='pending' AND due_at<=?", (now_iso,))}
+        held -= due
+
+        base = (f"SELECT p.id, p.full_name, p.city, p.county, p.birthday, p.address, p.source, "
+                f"p.lead_score, p.stage, p.last_activity_at, p.owner, "
+                f"(SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id ORDER BY dialed_at DESC LIMIT 1) last_outcome "
+                f"FROM people p WHERE p.stage<>'dnc' AND p.stage<>'closed'{own}")
+
+        def add(r, qtype):
+            pid = r["id"]
+            if pid in seen or pid in held:
+                return
+            ph = phone_of(pid)
+            if not ph or suppressed(ph):
+                return
+            seen.add(pid)
+            rows.append({"Queue_Type": qtype, "Name": r["full_name"] or "", "Phone": ph,
+                         "Address": r["address"] or "", "City": r["city"] or "", "County": r["county"] or "",
+                         "Birthday": r["birthday"] or "", "Last_Disposition": r["last_outcome"] or "",
+                         "Last_Call_Time": r["last_activity_at"] or "", "Source": r["source"] or "",
+                         "Lead_Score": r["lead_score"], "person_id": pid})
+
+        # 1) scheduled calls due
+        if due:
+            q = base + " AND p.id IN ({}) ORDER BY p.lead_score DESC".format(",".join("?" * len(due)))
+            for r in conn.execute(q, own_p + list(due)):
+                add(r, "scheduled_call")
+        # 2) callbacks
+        for r in conn.execute(base + " AND p.stage='callback' ORDER BY p.last_activity_at ASC", own_p):
+            add(r, "callback")
+        # 3) hot fresh (<24h)
+        for r in conn.execute(base + " AND p.stage='new' AND p.first_seen_at>=? ORDER BY p.lead_score DESC, p.first_seen_at DESC",
+                              own_p + [cutoff_24h]):
+            add(r, "hot_fresh")
+        # 4) other new by score
+        for r in conn.execute(base + " AND p.stage='new' ORDER BY p.lead_score DESC, p.first_seen_at ASC", own_p):
+            add(r, "never_called")
+        # 5) retry by score
+        for r in conn.execute(base + " AND p.stage IN ('attempted','voicemail') ORDER BY p.lead_score DESC, p.last_activity_at ASC", own_p):
+            add(r, "retry")
+    return jsonify({"count": len(rows), "queue": rows[:limit]})
+
+
 @app.route("/api/pipeline")
 def api_pipeline():
     """The money view: deals in flight, revenue won, close rate, and the full
