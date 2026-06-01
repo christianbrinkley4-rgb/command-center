@@ -21,6 +21,7 @@
   <nav class="tabs">
     <button class="tab active" data-view="today">Today</button>
     <button class="tab" data-view="automations">Automations</button>
+    <button class="tab" data-view="messages">Messages</button>
     <button class="tab" data-view="analytics">Analytics</button>
     <button class="tab" data-view="leads">Lead Book</button>
   </nav>
@@ -90,6 +91,18 @@
       <div class="panel-head"><h3>Recently fired automatically</h3></div>
       <div class="auto-list" id="firedList"></div>
     </div>
+  </section>
+
+  <!-- ============ MESSAGES / TEMPLATES ============ -->
+  <section id="view-messages" class="view hidden">
+    <div class="msg-intro">
+      <div>
+        <div class="auto-title">Message Templates</div>
+        <div class="auto-desc">Edit the exact wording the system sends. Use merge fields like <code>{first}</code>, <code>{agent}</code>, <code>{city}</code>, <code>{when_called}</code> — they fill in automatically. Wrap optional bits in <code>{opt: in {city}}</code> so they vanish when data is missing.</div>
+      </div>
+      <span class="msg-badge preview" id="msgLiveBadge">PREVIEW only</span>
+    </div>
+    <div id="templateList"></div>
   </section>
 
   <!-- ============ ANALYTICS ============ -->

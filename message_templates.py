@@ -131,9 +131,104 @@ def build_merge_data(person, last_call_at=None, appt_at=None, now=None):
     return data
 
 
+# Human-friendly labels + when each template is used (shown in the editor).
+TEMPLATE_META = {
+    "post_voicemail_text": ("Text after voicemail", "Sent ~10 min after you leave a voicemail."),
+    "vm_followup": ("Voicemail follow-up text", "Alternate wording for the post-voicemail text."),
+    "day7_followup": ("Day-7 follow-up text", "Sent about a week later if still no contact."),
+    "appt_reminder": ("Appointment reminder", "Sent 24h before and the morning of an appointment."),
+    "callback_confirm": ("Callback confirmation", "Sent when a callback time is set."),
+    "nurture_email_1": ("Intro nurture email", "Sent a few days after a voicemail/no-answer if we have an email."),
+}
+
+# ---------------------------------------------------------------- DB-backed editing
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS templates (
+    key         TEXT PRIMARY KEY,
+    sms         TEXT DEFAULT '',
+    email_subject TEXT DEFAULT '',
+    email_body  TEXT DEFAULT '',
+    updated_at  TEXT
+);
+"""
+
+
+def ensure_schema_and_seed():
+    """Create the templates table and seed it from the defaults the first time only.
+    After that, your edits in the DB win — defaults never overwrite them."""
+    import db
+    from datetime import datetime as _dt
+    with db.connect() as conn:
+        conn.executescript(_SCHEMA)
+        for key, tpl in TEMPLATES.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO templates(key, sms, email_subject, email_body, updated_at) VALUES (?,?,?,?,?)",
+                (key, tpl.get("sms", ""), tpl.get("email_subject", ""), tpl.get("email_body", ""),
+                 _dt.now().isoformat(timespec="seconds")))
+
+
+def _get_template(template_key):
+    """Return the DB version of a template if present, else the in-code default."""
+    try:
+        import db
+        with db.connect() as conn:
+            r = conn.execute("SELECT sms, email_subject, email_body FROM templates WHERE key=?",
+                             (template_key,)).fetchone()
+        if r:
+            return {"sms": r["sms"], "email_subject": r["email_subject"], "email_body": r["email_body"]}
+    except Exception:
+        pass
+    return TEMPLATES.get(template_key)
+
+
+def all_templates():
+    """All templates (DB-merged) with labels — for the editor."""
+    try:
+        ensure_schema_and_seed()
+    except Exception:
+        pass
+    out = []
+    for key in TEMPLATES:
+        t = _get_template(key) or {}
+        label, when = TEMPLATE_META.get(key, (key, ""))
+        out.append({"key": key, "label": label, "when": when,
+                    "sms": t.get("sms", ""), "email_subject": t.get("email_subject", ""),
+                    "email_body": t.get("email_body", "")})
+    return out
+
+
+def save_template(key, sms=None, email_subject=None, email_body=None):
+    import db
+    from datetime import datetime as _dt
+    if key not in TEMPLATES:
+        return False
+    ensure_schema_and_seed()
+    cur = _get_template(key) or {}
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO templates(key, sms, email_subject, email_body, updated_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET sms=excluded.sms, email_subject=excluded.email_subject, "
+            "email_body=excluded.email_body, updated_at=excluded.updated_at",
+            (key,
+             sms if sms is not None else cur.get("sms", ""),
+             email_subject if email_subject is not None else cur.get("email_subject", ""),
+             email_body if email_body is not None else cur.get("email_body", ""),
+             _dt.now().isoformat(timespec="seconds")))
+    return True
+
+
+def reset_template(key):
+    """Revert a single template to its built-in default."""
+    d = TEMPLATES.get(key)
+    if not d:
+        return False
+    return save_template(key, d.get("sms", ""), d.get("email_subject", ""), d.get("email_body", ""))
+
+
 def render(template_key, person, last_call_at=None, appt_at=None, channel="sms", now=None):
     """Return {channel, subject?, body} fully personalized, or None if no template."""
-    tpl = TEMPLATES.get(template_key)
+    tpl = _get_template(template_key)
     if not tpl:
         return None
     data = build_merge_data(person, last_call_at, appt_at, now)

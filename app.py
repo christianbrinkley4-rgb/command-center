@@ -566,6 +566,43 @@ def api_sms_status():
     return jsonify({"sms_live": senders.sms_enabled(), "email_live": senders.email_enabled()})
 
 
+@app.route("/api/templates", methods=["GET"])
+def api_templates():
+    import message_templates as mt
+    return jsonify({"templates": mt.all_templates(),
+                    "fields": ["first", "name", "agent", "city", "county", "when_called", "agent_phone"]})
+
+
+@app.route("/api/templates/<key>", methods=["POST"])
+def api_save_template(key):
+    import message_templates as mt
+    d = request.json or {}
+    if d.get("reset"):
+        ok = mt.reset_template(key)
+    else:
+        ok = mt.save_template(key, sms=d.get("sms"), email_subject=d.get("email_subject"),
+                              email_body=d.get("email_body"))
+    if not ok:
+        return jsonify({"error": "unknown template"}), 404
+    with db.connect() as conn:
+        db.audit(conn, "template", key, "edited", "")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/templates/preview", methods=["POST"])
+def api_template_preview():
+    """Render an UNSAVED template body against a sample lead — for the live editor."""
+    import message_templates as mt
+    from datetime import timedelta as _td
+    d = request.json or {}
+    person = {"full_name": "Sharon Miller", "first_name": "Sharon", "city": "Greensboro",
+              "county": "Guilford", "owner": "chris", "agent_phone": "(336) 962-2307"}
+    data = mt.build_merge_data(person, last_call_at=(datetime.now() - _td(days=1)).isoformat())
+    raw = d.get("sms") if d.get("channel", "sms") == "sms" else d.get("email_body", "")
+    body = mt._cleanup(mt._fill_fields(mt._fill_opts(raw or "", data), data))
+    return jsonify({"body": body})
+
+
 @app.route("/api/automations/run", methods=["POST"])
 def api_run_automations():
     """Manually fire due tasks now (the worker also does this every minute)."""
@@ -632,6 +669,11 @@ def start_background(initial=True):
         automation.ensure_schema()  # scheduled_tasks + automation_log
     except Exception as exc:
         print("automation schema warning:", exc)
+    try:
+        import message_templates as mt
+        mt.ensure_schema_and_seed()  # editable templates table
+    except Exception as exc:
+        print("templates schema warning:", exc)
     if initial:
         try:
             sync.sync_all()

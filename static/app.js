@@ -44,6 +44,7 @@ $$(".tab").forEach(t => t.onclick = () => {
   showView(t.dataset.view);
   if (t.dataset.view === "today") loadToday();
   if (t.dataset.view === "automations") loadAutomations();
+  if (t.dataset.view === "messages") loadTemplates();
   if (t.dataset.view === "analytics") loadAnalytics();
   if (t.dataset.view === "leads") loadLeads();
 });
@@ -178,6 +179,61 @@ $("#runNowBtn") && ($("#runNowBtn").onclick = async () => {
   toast(`Fired: ${r.sms || 0} texts · ${r.call_ready || 0} calls surfaced · ${r.email || 0} emails`);
   loadAutomations();
 });
+
+/* ---------------- MESSAGE TEMPLATES (editable) ---------------- */
+async function loadTemplates() {
+  const [d, status] = await Promise.all([
+    (await fetch("/api/templates")).json(),
+    (await fetch("/api/sms-status")).json(),
+  ]);
+  const live = status.sms_live || status.email_live;
+  const badge = $("#msgLiveBadge");
+  badge.className = "msg-badge " + (live ? "live" : "preview");
+  badge.textContent = live ? "● LIVE sending" : "PREVIEW only — nothing sends yet";
+  $("#templateList").innerHTML = d.templates.map(t => {
+    const isEmail = !!t.email_body;
+    return `<div class="tpl-card" data-key="${t.key}">
+      <div class="tpl-head"><div><div class="tpl-name">${esc(t.label)}</div><div class="tpl-when">${esc(t.when)}</div></div>
+        <span class="tpl-type">${isEmail ? "EMAIL" : "TEXT"}</span></div>
+      ${isEmail ? `<label class="tpl-label">Subject</label>
+        <input class="tpl-subject" value="${esc(t.email_subject)}">
+        <label class="tpl-label">Email body</label>
+        <textarea class="tpl-body" rows="7">${esc(t.email_body)}</textarea>`
+      : `<label class="tpl-label">Text message</label>
+        <textarea class="tpl-sms" rows="3">${esc(t.sms)}</textarea>`}
+      <div class="tpl-preview" data-key="${t.key}"></div>
+      <div class="tpl-actions">
+        <button class="q-btn" onclick="tplPreview('${t.key}', ${isEmail})">Preview</button>
+        <button class="btn-pill" onclick="tplSave('${t.key}', ${isEmail})">Save</button>
+        <button class="q-btn" onclick="tplReset('${t.key}')">Reset to default</button>
+      </div></div>`;
+  }).join("");
+  // auto-preview each
+  d.templates.forEach(t => tplPreview(t.key, !!t.email_body));
+}
+function tplCard(key) { return document.querySelector(`.tpl-card[data-key="${key}"]`); }
+async function tplPreview(key, isEmail) {
+  const card = tplCard(key);
+  const body = isEmail ? card.querySelector(".tpl-body").value : card.querySelector(".tpl-sms").value;
+  const r = await (await fetch("/api/templates/preview", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channel: isEmail ? "email" : "sms", sms: body, email_body: body }) })).json();
+  card.querySelector(".tpl-preview").innerHTML =
+    `<div class="tpl-prev-label">Preview (sample: Sharon, Greensboro, called yesterday)</div><div class="msg-bubble">${esc(r.body)}</div>`;
+}
+async function tplSave(key, isEmail) {
+  const card = tplCard(key);
+  const payload = isEmail
+    ? { email_subject: card.querySelector(".tpl-subject").value, email_body: card.querySelector(".tpl-body").value }
+    : { sms: card.querySelector(".tpl-sms").value };
+  await fetch(`/api/templates/${key}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  toast("Template saved ✓");
+}
+async function tplReset(key) {
+  if (!confirm("Reset this template to the built-in default?")) return;
+  await fetch(`/api/templates/${key}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reset: true }) });
+  toast("Reset to default");
+  loadTemplates();
+}
 
 /* ---------------- ANALYTICS ---------------- */
 async function loadAnalytics() {
@@ -432,7 +488,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "/") { e.preventDefault(); showView("leads"); loadLeads(); setTimeout(() => $("#leadSearch").focus(), 50); return; }
   if (VIEW_KEYS[e.key]) {
     const v = VIEW_KEYS[e.key]; showView(v);
-    ({ today: loadToday, automations: loadAutomations, analytics: loadAnalytics, leads: loadLeads }[v])();
+    ({ today: loadToday, automations: loadAutomations, analytics: loadAnalytics, leads: loadLeads }[v] || (() => {}))();
   }
   if (e.key.toLowerCase() === "r") { fetch("/api/sync", { method: "POST" }).then(refreshVisibleView); toast("Refreshed"); }
 });
@@ -441,6 +497,7 @@ document.addEventListener("keydown", e => {
 function refreshVisibleView() {
   if (activeView === "today") loadToday();
   else if (activeView === "automations") loadAutomations();
+  else if (activeView === "messages") { /* don't auto-refresh while editing */ }
   else if (activeView === "analytics") loadAnalytics();
   else if (activeView === "leads") loadLeads();
   else if (activeView === "lead" && currentLead) openLead(currentLead);

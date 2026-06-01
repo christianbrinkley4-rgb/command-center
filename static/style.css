@@ -296,3 +296,22 @@ main{padding:24px 26px 60px;max-width:1480px;margin:0 auto}
 .msg-badge.live{background:rgba(52,211,153,.14);color:var(--green)}
 .msg-bubble{background:linear-gradient(135deg,#1d4ed8,#2563eb);color:#fff;padding:12px 15px;border-radius:14px 14px 14px 4px;font-size:13.5px;line-height:1.45;box-shadow:0 4px 14px rgba(37,99,235,.3)}
 .msg-note{font-size:11.5px;color:var(--muted2);margin-top:8px}
+
+
+/* ================= message templates editor ================= */
+.msg-intro{display:flex;align-items:flex-start;gap:16px;background:var(--card);border:1px solid var(--border);border-radius:15px;padding:16px 20px;margin-bottom:16px;box-shadow:var(--shadow)}
+.msg-intro code{background:var(--bg2);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:12px;color:var(--cyan)}
+.msg-intro .msg-badge{margin-left:auto;white-space:nowrap}
+#templateList{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.tpl-card{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:18px;box-shadow:var(--shadow)}
+.tpl-head{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px}
+.tpl-name{font-weight:700;font-size:14px}
+.tpl-when{font-size:12px;color:var(--muted);margin-top:2px}
+.tpl-type{font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--cyan);background:rgba(34,211,238,.12);border-radius:6px;padding:3px 8px}
+.tpl-label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;margin:10px 0 5px}
+.tpl-card input,.tpl-card textarea{width:100%;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--txt);font-size:13px;font-family:inherit;line-height:1.5;resize:vertical}
+.tpl-card input:focus,.tpl-card textarea:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.12)}
+.tpl-preview{margin-top:12px}
+.tpl-prev-label{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted2);font-weight:600;margin-bottom:6px}
+.tpl-actions{display:flex;gap:8px;margin-top:12px;align-items:center}
+@media(max-width:1100px){#templateList{grid-template-columns:1fr}}
