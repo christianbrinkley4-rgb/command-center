@@ -144,6 +144,26 @@ CREATE TABLE IF NOT EXISTS deals (
 CREATE INDEX IF NOT EXISTS idx_deals_person ON deals(person_id);
 CREATE INDEX IF NOT EXISTS idx_deals_stage  ON deals(stage);
 
+CREATE TABLE IF NOT EXISTS transcripts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id         INTEGER REFERENCES people(id),
+    call_attempt_id   INTEGER REFERENCES call_attempts(id),
+    call_control_id   TEXT,
+    recording_id      TEXT,
+    transcription_id  TEXT UNIQUE,       -- Telnyx id; idempotent ingest
+    source            TEXT DEFAULT 'telnyx',
+    language          TEXT DEFAULT 'en',
+    duration_seconds  REAL,
+    full_text         TEXT,               -- formatted "[Speaker A 00:03] hello..." text
+    segments_json     TEXT,               -- raw diarized segments
+    raw_payload       TEXT,               -- full Telnyx event payload (debugging / audit)
+    analysis_json     TEXT DEFAULT '',    -- post-call AI analysis (outcome, appt, notes, ...)
+    created_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_transcripts_call    ON transcripts(call_control_id);
+CREATE INDEX IF NOT EXISTS idx_transcripts_person  ON transcripts(person_id);
+CREATE INDEX IF NOT EXISTS idx_transcripts_created ON transcripts(created_at);
+
 CREATE INDEX IF NOT EXISTS idx_calls_person   ON call_attempts(person_id);
 CREATE INDEX IF NOT EXISTS idx_calls_dialed   ON call_attempts(dialed_at);
 CREATE INDEX IF NOT EXISTS idx_calls_disp     ON call_attempts(disposition_category);

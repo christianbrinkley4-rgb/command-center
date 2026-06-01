@@ -112,6 +112,39 @@ def manifest():
              "purpose": "Bulk export of all people (optionally filtered) for any agent/analytics.",
              "query": {"stage": "optional", "source": "optional", "updated_since": "ISO ts optional", "limit": "default 1000"},
              "returns": {"count": 0, "people": []}},
+            {"method": "POST", "path": "/agent/transcripts/ingest",
+             "purpose": "Dialer -> brain: store the diarized text of a finished call. Idempotent on transcription_id.",
+             "body": {"call_control_id": "telnyx id (UNIQUE on call_attempts)", "transcription_id": "telnyx id",
+                      "recording_id": "telnyx id", "language": "en", "duration_seconds": 0,
+                      "full_text": "[Speaker A 00:03] ...", "segments": [{"speaker": "Speaker A",
+                      "channel": 0, "start": 0.0, "end": 1.2, "text": "..."}], "raw_payload": {}},
+             "returns": {"ok": True, "matched": True, "transcript_id": 0, "person_id": 0, "call_attempt_id": 0}},
+            {"method": "GET", "path": "/agent/admin/recent-calls",
+             "purpose": "Admin menu: most recent calls with person/disposition context.",
+             "query": {"limit": "default 25", "owner": "optional"},
+             "returns": {"count": 0, "calls": []}},
+            {"method": "GET", "path": "/agent/admin/lead/search",
+             "purpose": "Admin menu: find a lead by phone digits or name fragment.",
+             "query": {"q": "required", "limit": "default 25"}},
+            {"method": "GET", "path": "/agent/admin/lead/{id}",
+             "purpose": "Admin menu: full lead detail (phones, calls, appointments, transcripts, notes)."},
+            {"method": "POST", "path": "/agent/admin/lead/{id}/update",
+             "purpose": "Admin menu: edit lead fields, log a manual disposition, or append a note.",
+             "body": {"stage": "callback (optional, must be a valid stage)", "full_name": "...",
+                      "city": "...", "email": "...", "owner": "...", "lead_score": 0,
+                      "disposition": "not_interested (optional manual log)",
+                      "agent": "chris (optional)", "note": "free text (optional)"},
+             "returns": {"ok": True, "changed": {}, "before": {}, "person": {}}},
+            {"method": "POST", "path": "/agent/admin/appointment/undo",
+             "purpose": "Admin menu: strip an appointment flag and put the lead back in the dialing pool.",
+             "body": {"person_id": "or appointment_id or call_control_id or phone",
+                      "new_stage": "optional override; default callback if ever contacted, else attempted"},
+             "returns": {"ok": True, "person_id": 0, "undone_appointments": [], "new_stage": "callback"}},
+            {"method": "POST", "path": "/agent/admin/lead/{id}/dnc",
+             "purpose": "Admin menu: hard DNC — suppress the person and all their phones, stage=dnc.",
+             "body": {"reason": "manual_dnc (default)"}, "returns": {"ok": True}},
+            {"method": "GET", "path": "/agent/admin/transcript/{id}",
+             "purpose": "Admin menu: fetch one transcript (full text + raw segments)."},
             {"method": "GET", "path": "/agent/schema", "purpose": "Field dictionary for people/messages."},
         ],
     })
@@ -201,8 +234,8 @@ def leads_import():
 # ------------------------------------------------------------------ ensure schema extras
 
 def _ensure_columns():
-    """Add columns the agent API relies on (email on people, subject on messages),
-    safely and idempotently — won't disturb existing data."""
+    """Add columns the agent API relies on (email on people, subject on messages,
+    analysis_json on transcripts), safely and idempotently — won't disturb existing data."""
     with db.connect() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(people)")}
         if "email" not in cols:
@@ -210,6 +243,15 @@ def _ensure_columns():
         mcols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
         if "subject" not in mcols:
             conn.execute("ALTER TABLE messages ADD COLUMN subject TEXT DEFAULT ''")
+        # transcripts may not exist yet on a freshly initialized DB — init_db creates
+        # it with analysis_json already in the schema below; this guard handles the
+        # upgrade-an-old-DB case.
+        try:
+            tcols = {r["name"] for r in conn.execute("PRAGMA table_info(transcripts)")}
+        except Exception:
+            tcols = set()
+        if tcols and "analysis_json" not in tcols:
+            conn.execute("ALTER TABLE transcripts ADD COLUMN analysis_json TEXT DEFAULT ''")
 
 
 # ------------------------------------------------------------------ 2) call agent: queue / score / disposition
@@ -477,6 +519,444 @@ def leads_opt_out():
         conn.execute("UPDATE people SET stage='dnc', last_activity_at=? WHERE id=?", (_now(), pid))
         db.audit(conn, "person", pid, "opted_out", reason)
     return jsonify({"ok": True, "matched_person": True, "person_id": pid})
+
+
+# ------------------------------------------------------------------ transcripts
+
+@agent_api.route("/agent/transcripts/ingest", methods=["POST"])
+def transcripts_ingest():
+    """Receive a completed Telnyx transcription from the dialer.
+
+    The dialer fires this when `call.recording.transcription.saved` arrives.
+    We join on call_control_id (UNIQUE on call_attempts) to find the lead, but
+    we still store the transcript even if the join misses (so it can be
+    back-filled later by re-syncing dial_results.xlsx).
+    """
+    import json as _json
+    d = request.get_json(silent=True) or {}
+    call_control_id = _clean(d.get("call_control_id"))
+    transcription_id = _clean(d.get("transcription_id"))
+    recording_id = _clean(d.get("recording_id"))
+    language = _clean(d.get("language")) or "en"
+    full_text = _clean(d.get("full_text"))
+    segments = d.get("segments") or []
+    raw_payload = d.get("raw_payload") or {}
+    try:
+        duration_seconds = float(d.get("duration_seconds") or 0)
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+
+    if not call_control_id and not transcription_id:
+        return jsonify({"error": "call_control_id or transcription_id required"}), 400
+
+    with db.connect() as conn:
+        # Idempotency: same transcription_id arriving twice should be a no-op.
+        if transcription_id:
+            existing = conn.execute(
+                "SELECT id, person_id, call_attempt_id FROM transcripts WHERE transcription_id=?",
+                (transcription_id,),
+            ).fetchone()
+            if existing:
+                return jsonify({
+                    "ok": True,
+                    "matched": existing["person_id"] is not None,
+                    "transcript_id": existing["id"],
+                    "person_id": existing["person_id"],
+                    "call_attempt_id": existing["call_attempt_id"],
+                    "duplicate": True,
+                })
+
+        person_id, call_attempt_id = None, None
+        if call_control_id:
+            row = conn.execute(
+                "SELECT id, person_id FROM call_attempts WHERE call_control_id=?",
+                (call_control_id,),
+            ).fetchone()
+            if row:
+                call_attempt_id = row["id"]
+                person_id = row["person_id"]
+
+        cur = conn.execute("""INSERT INTO transcripts
+            (person_id, call_attempt_id, call_control_id, recording_id,
+             transcription_id, source, language, duration_seconds,
+             full_text, segments_json, raw_payload, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (person_id, call_attempt_id, call_control_id, recording_id,
+             transcription_id or None, "telnyx", language, duration_seconds,
+             full_text, _json.dumps(segments), _json.dumps(raw_payload), _now()))
+        transcript_id = cur.lastrowid
+
+        context = {}
+        if person_id:
+            conn.execute("UPDATE people SET last_activity_at=? WHERE id=?", (_now(), person_id))
+            db.audit(conn, "person", person_id, "transcript_ingested",
+                     f"transcript_id={transcript_id} call={call_control_id[-12:]}")
+            # Snapshot the bits post-call analysis needs while we still hold the lock.
+            row = conn.execute(
+                "SELECT full_name, city FROM people WHERE id=?", (person_id,)).fetchone()
+            ca = conn.execute(
+                "SELECT agent, disposition, dialed_at FROM call_attempts WHERE id=?",
+                (call_attempt_id,)).fetchone() if call_attempt_id else None
+            if row:
+                context = {
+                    "full_name": row["full_name"],
+                    "city": row["city"],
+                    "agent": ca["agent"] if ca else "",
+                    "prior_disposition": ca["disposition"] if ca else "",
+                    "dialed_at": ca["dialed_at"] if ca else "",
+                }
+        else:
+            db.audit(conn, "transcript", transcript_id, "unmatched_call",
+                     f"call_control_id={call_control_id}")
+
+    post_call_queued = False
+    if person_id and full_text:
+        try:
+            import post_call
+            if post_call.is_enabled():
+                from threading import Thread
+                Thread(
+                    target=post_call.process,
+                    args=(transcript_id, person_id, call_attempt_id, full_text, context),
+                    kwargs={"agent": context.get("agent", "")},
+                    daemon=True,
+                ).start()
+                post_call_queued = True
+        except Exception:
+            pass
+
+    return jsonify({
+        "ok": True,
+        "matched": person_id is not None,
+        "transcript_id": transcript_id,
+        "person_id": person_id,
+        "call_attempt_id": call_attempt_id,
+        "post_call_queued": post_call_queued,
+    })
+
+
+# ------------------------------------------------------------------ admin (manual overrides used by the terminal menu)
+#
+# Same blueprint -> same bearer-token auth. Every write logs to audit_log with
+# the actor from the X-Admin-Actor header (default 'admin_menu') so manual
+# overrides are traceable.
+
+ADMIN_VALID_STAGES = VALID_STAGES | {"voicemail"}
+
+
+def _actor():
+    return _clean(request.headers.get("X-Admin-Actor")) or "admin_menu"
+
+
+def _resolve_person_id(conn, payload):
+    """Look up a person by any of person_id / phone / call_control_id."""
+    pid = payload.get("person_id")
+    if pid:
+        return int(pid)
+    phone = db.normalize_phone(payload.get("phone"))
+    if phone:
+        row = conn.execute("SELECT person_id FROM phone_numbers WHERE e164=?", (phone,)).fetchone()
+        if row:
+            return row["person_id"]
+    call_control_id = _clean(payload.get("call_control_id"))
+    if call_control_id:
+        row = conn.execute("SELECT person_id FROM call_attempts WHERE call_control_id=?",
+                           (call_control_id,)).fetchone()
+        if row:
+            return row["person_id"]
+    return None
+
+
+def _person_summary_row(conn, pid):
+    """Single-row person view used by every admin response."""
+    row = conn.execute("""
+        SELECT p.id, p.full_name, p.first_name, p.last_name, p.city, p.county,
+               p.birthday, p.email, p.source, p.owner, p.stage, p.lead_score,
+               p.last_activity_at,
+               (SELECT e164 FROM phone_numbers x WHERE x.person_id=p.id AND x.status='active' LIMIT 1) phone,
+               (SELECT disposition FROM call_attempts c WHERE c.person_id=p.id
+                ORDER BY dialed_at DESC LIMIT 1) last_disposition
+        FROM people p WHERE p.id=?""", (pid,)).fetchone()
+    return dict(row) if row else None
+
+
+@agent_api.route("/agent/admin/recent-calls")
+def admin_recent_calls():
+    """Last N calls across all agents — fuel for the menu's 'pick a call' view."""
+    limit = min(int(request.args.get("limit", 25)), 200)
+    owner = _clean(request.args.get("owner"))
+    where, params = [], []
+    if owner:
+        where.append("c.agent=?")
+        params.append(owner)
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    with db.connect() as conn:
+        rows = conn.execute(f"""
+            SELECT c.id call_attempt_id, c.call_control_id, c.dialed_at, c.disposition,
+                   c.disposition_category, c.agent, c.phone, c.live_talk_seconds,
+                   c.person_id, p.full_name, p.city, p.stage,
+                   (SELECT 1 FROM transcripts t WHERE t.call_control_id=c.call_control_id LIMIT 1) has_transcript
+            FROM call_attempts c
+            LEFT JOIN people p ON p.id=c.person_id
+            {clause}
+            ORDER BY c.dialed_at DESC
+            LIMIT ?""", params + [limit]).fetchall()
+    return jsonify({"count": len(rows), "calls": [dict(r) for r in rows]})
+
+
+@agent_api.route("/agent/admin/lead/search")
+def admin_lead_search():
+    """Find a lead by phone (digits anywhere) or name fragment."""
+    q = _clean(request.args.get("q"))
+    if not q:
+        return jsonify({"error": "q is required"}), 400
+    limit = min(int(request.args.get("limit", 25)), 200)
+    digits = "".join(ch for ch in q if ch.isdigit())
+    with db.connect() as conn:
+        results = []
+        if digits and len(digits) >= 4:
+            tail = digits[-10:]
+            rows = conn.execute("""
+                SELECT DISTINCT p.id, p.full_name, p.city, p.stage, p.owner, p.lead_score,
+                                ph.e164 phone
+                FROM phone_numbers ph
+                JOIN people p ON p.id=ph.person_id
+                WHERE REPLACE(REPLACE(REPLACE(ph.e164,'+',''),'-',''),' ','') LIKE ?
+                ORDER BY p.last_activity_at DESC
+                LIMIT ?""", (f"%{tail}%", limit)).fetchall()
+            results.extend(dict(r) for r in rows)
+        if len(results) < limit:
+            rows = conn.execute("""
+                SELECT p.id, p.full_name, p.city, p.stage, p.owner, p.lead_score,
+                       (SELECT e164 FROM phone_numbers x WHERE x.person_id=p.id LIMIT 1) phone
+                FROM people p
+                WHERE lower(p.full_name) LIKE ?
+                ORDER BY p.last_activity_at DESC
+                LIMIT ?""", (f"%{q.lower()}%", limit - len(results))).fetchall()
+            seen = {r["id"] for r in results}
+            for r in rows:
+                d = dict(r)
+                if d["id"] not in seen:
+                    results.append(d)
+    return jsonify({"count": len(results), "leads": results})
+
+
+@agent_api.route("/agent/admin/lead/<int:pid>")
+def admin_lead_detail(pid):
+    with db.connect() as conn:
+        person = _person_summary_row(conn, pid)
+        if not person:
+            return jsonify({"error": "lead not found", "person_id": pid}), 404
+        phones = [dict(r) for r in conn.execute(
+            "SELECT e164, line_type, status FROM phone_numbers WHERE person_id=?", (pid,))]
+        calls = [dict(r) for r in conn.execute("""
+            SELECT id, call_control_id, dialed_at, disposition, disposition_category,
+                   live_talk_seconds, agent, phone
+            FROM call_attempts WHERE person_id=? ORDER BY dialed_at DESC LIMIT 25""", (pid,))]
+        appts = [dict(r) for r in conn.execute("""
+            SELECT id, scheduled_at, status, agent, notes, created_at
+            FROM appointments WHERE person_id=? ORDER BY scheduled_at DESC""", (pid,))]
+        notes = [dict(r) for r in conn.execute("""
+            SELECT id, body, author, created_at FROM person_notes
+            WHERE person_id=? ORDER BY created_at DESC LIMIT 20""", (pid,))]
+        transcripts = [dict(r) for r in conn.execute("""
+            SELECT id, call_control_id, language, duration_seconds, created_at,
+                   substr(full_text, 1, 300) preview
+            FROM transcripts WHERE person_id=? ORDER BY created_at DESC LIMIT 10""", (pid,))]
+        suppressed = conn.execute("""
+            SELECT 1 FROM suppressions WHERE scope='person' AND value=? LIMIT 1""", (str(pid),)).fetchone()
+    return jsonify({
+        "person": person,
+        "phones": phones,
+        "calls": calls,
+        "appointments": appts,
+        "notes": notes,
+        "transcripts": transcripts,
+        "is_suppressed": bool(suppressed),
+    })
+
+
+@agent_api.route("/agent/admin/transcript/<int:tid>")
+def admin_transcript_detail(tid):
+    with db.connect() as conn:
+        row = conn.execute("""
+            SELECT t.*, p.full_name, p.city
+            FROM transcripts t LEFT JOIN people p ON p.id=t.person_id
+            WHERE t.id=?""", (tid,)).fetchone()
+    if not row:
+        return jsonify({"error": "transcript not found"}), 404
+    return jsonify({"transcript": dict(row)})
+
+
+_EDITABLE_FIELDS = {
+    "stage", "full_name", "first_name", "last_name", "city", "county",
+    "address", "email", "owner", "notes", "lead_score", "birthday", "source",
+}
+
+
+@agent_api.route("/agent/admin/lead/<int:pid>/update", methods=["POST"])
+def admin_lead_update(pid):
+    d = request.get_json(silent=True) or {}
+    with db.connect() as conn:
+        before = _person_summary_row(conn, pid)
+        if not before:
+            return jsonify({"error": "lead not found", "person_id": pid}), 404
+
+        sets, params, changed = [], [], {}
+        for field, value in d.items():
+            if field not in _EDITABLE_FIELDS:
+                continue
+            value = _clean(value) if not isinstance(value, (int, float)) else value
+            if field == "stage" and value and value not in ADMIN_VALID_STAGES:
+                return jsonify({"error": f"invalid stage '{value}'",
+                                "valid_stages": sorted(ADMIN_VALID_STAGES)}), 400
+            if field == "lead_score":
+                try:
+                    value = max(0, min(100, int(value)))
+                except (TypeError, ValueError):
+                    return jsonify({"error": "lead_score must be 0-100"}), 400
+            sets.append(f"{field}=?")
+            params.append(value)
+            changed[field] = value
+
+        # Optional manual disposition: lets the menu log a corrected outcome
+        # (e.g. mark a call 'not_interested' that was misclassified).
+        disposition = _clean(d.get("disposition")).lower()
+        if disposition:
+            category = db.disposition_category(disposition)
+            conn.execute("""INSERT INTO call_attempts
+                (person_id, agent, dialed_at, disposition, disposition_category, dedupe_key)
+                VALUES (?,?,?,?,?,?)""",
+                (pid, _clean(d.get("agent")) or _actor(), _now(), disposition, category,
+                 f"admin|{pid}|{_now()}|{disposition}"))
+            changed["manual_disposition"] = disposition
+
+        if not sets and not disposition:
+            return jsonify({"ok": True, "changed": {}, "person": before}), 200
+
+        if sets:
+            sets.append("last_activity_at=?"); params.append(_now())
+            params.append(pid)
+            conn.execute(f"UPDATE people SET {', '.join(sets)} WHERE id=?", params)
+
+        if _clean(d.get("note")):
+            conn.execute("""INSERT INTO person_notes(person_id, body, author, created_at)
+                            VALUES (?,?,?,?)""",
+                         (pid, _clean(d["note"]), _actor(), _now()))
+            changed["note"] = _clean(d["note"])
+
+        db.audit(conn, "person", pid, "admin_update",
+                 ", ".join(f"{k}={v!r}" for k, v in changed.items()), _actor())
+        after = _person_summary_row(conn, pid)
+
+    return jsonify({"ok": True, "changed": changed, "before": before, "person": after})
+
+
+@agent_api.route("/agent/admin/appointment/undo", methods=["POST"])
+def admin_appointment_undo():
+    """Undo an appointment flag and return the lead to the active dialing pool.
+
+    Accepts {person_id} (undoes latest scheduled appt for that lead) OR
+    {appointment_id} (specific appointment) OR {call_control_id} (resolves to
+    the call's owning lead). Sets stage based on the lead's prior history so
+    they fall back to the right tier of the ranked queue."""
+    d = request.get_json(silent=True) or {}
+    appointment_id = d.get("appointment_id")
+    new_stage_override = _clean(d.get("new_stage")).lower()
+    undone = []
+
+    with db.connect() as conn:
+        if appointment_id:
+            row = conn.execute("SELECT id, person_id FROM appointments WHERE id=?",
+                               (appointment_id,)).fetchone()
+            if not row:
+                return jsonify({"error": "appointment not found"}), 404
+            pid = row["person_id"]
+            target_ids = [row["id"]]
+        else:
+            pid = _resolve_person_id(conn, d)
+            if not pid:
+                return jsonify({"error": "send person_id, phone, call_control_id, or appointment_id"}), 400
+            rows = conn.execute("""SELECT id FROM appointments
+                                   WHERE person_id=? AND status NOT IN ('cancelled','no_show')
+                                   ORDER BY scheduled_at DESC LIMIT 1""", (pid,)).fetchall()
+            target_ids = [r["id"] for r in rows]
+            if not target_ids:
+                return jsonify({"error": "no active appointment found for that lead",
+                                "person_id": pid}), 404
+
+        # Decide where the lead should land. If they've ever had a live conversation,
+        # 'callback' (top tier of the active queue). Otherwise fall back to 'attempted'.
+        if new_stage_override and new_stage_override in ADMIN_VALID_STAGES:
+            new_stage = new_stage_override
+        else:
+            had_contact = conn.execute("""SELECT 1 FROM call_attempts
+                WHERE person_id=? AND disposition_category IN ('live_conversation','callback') LIMIT 1""",
+                (pid,)).fetchone()
+            new_stage = "callback" if had_contact else "attempted"
+
+        for aid in target_ids:
+            conn.execute("""UPDATE appointments
+                            SET status='cancelled',
+                                notes=COALESCE(NULLIF(notes,''),'') || ?
+                            WHERE id=?""",
+                         (f"\n[{_now()}] {_actor()}: undone via admin menu", aid))
+            undone.append(aid)
+
+        conn.execute("UPDATE people SET stage=?, last_activity_at=? WHERE id=?",
+                     (new_stage, _now(), pid))
+        conn.execute("""INSERT INTO person_notes(person_id, body, author, created_at)
+                        VALUES (?,?,?,?)""",
+                     (pid, f"Appointment undone via admin menu -> stage={new_stage}",
+                      _actor(), _now()))
+
+        # Cancel any pending appointment-reminder tasks the automation queued.
+        try:
+            import automation
+            automation.cancel_pending(conn, pid, "appointment_undone")
+        except Exception:
+            pass
+
+        db.audit(conn, "person", pid, "appointment_undone",
+                 f"appointments={undone} new_stage={new_stage}", _actor())
+        after = _person_summary_row(conn, pid)
+
+    return jsonify({
+        "ok": True,
+        "person_id": pid,
+        "undone_appointments": undone,
+        "new_stage": new_stage,
+        "person": after,
+    })
+
+
+@agent_api.route("/agent/admin/lead/<int:pid>/dnc", methods=["POST"])
+def admin_lead_dnc(pid):
+    """Manual DNC: suppresses the person and all their phones, sets stage='dnc',
+    and cancels any pending automation tasks."""
+    d = request.get_json(silent=True) or {}
+    reason = _clean(d.get("reason")) or "manual_dnc"
+    with db.connect() as conn:
+        person = _person_summary_row(conn, pid)
+        if not person:
+            return jsonify({"error": "lead not found"}), 404
+
+        conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('person',?,?,?)",
+                     (str(pid), reason, _now()))
+        for r in conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=?", (pid,)):
+            conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
+                         (r["e164"], reason, _now()))
+        conn.execute("UPDATE people SET stage='dnc', last_activity_at=? WHERE id=?", (_now(), pid))
+        conn.execute("""INSERT INTO person_notes(person_id, body, author, created_at)
+                        VALUES (?,?,?,?)""",
+                     (pid, f"Manually marked DNC ({reason})", _actor(), _now()))
+        try:
+            import automation
+            automation.cancel_pending(conn, pid, reason)
+        except Exception:
+            pass
+        db.audit(conn, "person", pid, "manual_dnc", reason, _actor())
+    return jsonify({"ok": True, "person_id": pid, "reason": reason})
 
 
 # ------------------------------------------------------------------ bulk export
