@@ -63,6 +63,8 @@ def build_queue(owner="", limit=2000, did_cap=0):
                 return
             if _is_suppressed_person(conn, pid):
                 return
+            if not geo_policy.birthday_is_target(person["birthday"]):
+                return
             if geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True) and not geo_policy.city_is_allowed(person["city"]):
                 return
             ph = phones(pid)

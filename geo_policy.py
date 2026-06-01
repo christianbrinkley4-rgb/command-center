@@ -1,6 +1,7 @@
 """Shared Greensboro-area dialing policy."""
 import os
 import re
+from datetime import datetime
 
 
 ALLOWED_CITY_NAMES = {
@@ -99,3 +100,29 @@ def filter_enabled(env_name="CC_GEO_FILTER_ENABLED", default=True):
     if raw is None or str(raw).strip() == "":
         return bool(default)
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def target_birth_years():
+    raw = os.getenv("CC_TARGET_BIRTH_YEARS", "1962")
+    years = set()
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if part.isdigit() and len(part) == 4:
+            years.add(int(part))
+    return years or {1962}
+
+
+def birth_year(birthday):
+    text = str(birthday or "").strip()
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(text, fmt).date().year
+        except (TypeError, ValueError):
+            continue
+    match = re.search(r"\b(19|20)\d{2}\b", text)
+    return int(match.group(0)) if match else None
+
+
+def birthday_is_target(birthday):
+    year = birth_year(birthday)
+    return year in target_birth_years()

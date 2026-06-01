@@ -69,6 +69,16 @@ def _age(birthday):
     return None
 
 
+def _target_lead(row):
+    if not row:
+        return False
+    try:
+        birthday = row["birthday"]
+    except (KeyError, TypeError):
+        birthday = row.get("birthday", "") if hasattr(row, "get") else ""
+    return geo_policy.birthday_is_target(birthday)
+
+
 def _pct(n, d):
     return round(100.0 * n / d, 1) if d else 0.0
 
@@ -173,6 +183,8 @@ def api_action_queue():
         for r in conn.execute(
             f"""SELECT id, full_name, city, county, birthday, owner, lead_score, last_activity_at
                FROM people WHERE stage='callback'{own_sql} ORDER BY last_activity_at DESC LIMIT 100""", own_p):
+            if not _target_lead(r):
+                continue
             d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["id"])
             callbacks.append(d)
 
@@ -184,6 +196,8 @@ def api_action_queue():
                       p.id person_id, p.full_name, p.city, p.birthday
                FROM appointments a JOIN people p ON p.id=a.person_id
                WHERE a.status IN ('scheduled','kept'){appt_own} ORDER BY a.scheduled_at LIMIT 100""", own_p):
+            if not _target_lead(r):
+                continue
             d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["person_id"])
             appointments.append(d)
 
@@ -226,6 +240,7 @@ def api_leads():
     order = sort_cols.get(sort, "last_activity_at")
 
     owner = (request.args.get("owner") or "").strip().lower()
+    include_ineligible = (request.args.get("include_ineligible") or "").strip().lower() in {"1", "true", "yes"}
     where, params = [], []
     if q:
         where.append("(p.full_name LIKE ? OR ph.e164 LIKE ? OR p.city LIKE ?)")
@@ -239,6 +254,7 @@ def api_leads():
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     direction = "ASC" if order == "full_name" or order == "city" else "DESC"
 
+    fetch_limit = 500 if include_ineligible else 5000
     with db.connect() as conn:
         rows = conn.execute(f"""
             SELECT p.id, p.full_name, p.city, p.county, p.source, p.stage, p.lead_score,
@@ -250,13 +266,17 @@ def api_leads():
             {clause}
             GROUP BY p.id
             ORDER BY {order} {direction}
-            LIMIT 500
-        """, params).fetchall()
+            LIMIT ?
+        """, params + [fetch_limit]).fetchall()
     out = []
     for r in rows:
+        if not include_ineligible and not _target_lead(r):
+            continue
         d = dict(r)
         d["age"] = _age(r["birthday"])
         out.append(d)
+        if len(out) >= 500:
+            break
     return jsonify({"leads": out, "count": len(out)})
 
 
@@ -477,6 +497,7 @@ def api_export_csv():
     import io
     stage = (request.args.get("stage") or "").strip()
     q = (request.args.get("q") or "").strip()
+    include_ineligible = (request.args.get("include_ineligible") or "").strip().lower() in {"1", "true", "yes"}
     where, params = [], []
     if stage:
         where.append("p.stage=?"); params.append(stage)
@@ -499,6 +520,8 @@ def api_export_csv():
                     ORDER BY dialed_at DESC LIMIT 1) last_outcome
             FROM people p {clause} ORDER BY p.lead_score DESC LIMIT 20000""", params).fetchall()
     for r in rows:
+        if not include_ineligible and not _target_lead(r):
+            continue
         d = dict(r); d["age"] = _age(r["birthday"])
         w.writerow([d.get(c, "") for c in cols])
     fname = f"command_center_leads_{date.today().isoformat()}.csv"
@@ -694,6 +717,8 @@ def _build_ranked_queue(owner="", limit=5000):
             if pid in seen or pid in held:
                 return
             if person_suppressed(pid):
+                return
+            if not _target_lead(r):
                 return
             if _geo_filter_enabled() and not _city_in_whitelist(r["city"]):
                 return
