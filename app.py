@@ -18,6 +18,7 @@ from flask import Flask, jsonify, request, render_template, Response
 
 import db
 import sync
+import geo_policy
 from agent_api import agent_api, _ensure_columns as _agent_ensure_columns
 
 app = Flask(__name__)
@@ -619,11 +620,35 @@ CITY_DRIVE_MIN = {
 }
 DEFAULT_DRIVE_MIN = 45  # unknown/farther cities go after known-close ones
 
+# 30-minute drive-time whitelist (mirrors loader.py in the dialer). Enabled by
+# default; set CC_GEO_FILTER_ENABLED=false only for explicit audit/export work.
+ALLOWED_CITY_NAMES = {
+    "archdale", "browns summit", "burlington", "climax", "colfax",
+    "elon", "forest oaks", "gibsonville", "graham", "greensboro", "haw river",
+    "high point", "jamestown", "julian", "kernersville", "liberty", "mcleansville",
+    "mebane", "oak ridge", "pleasant garden", "randleman", "reidsville", "sedalia",
+    "sophia", "stokesdale", "summerfield", "thomasville", "trinity", "whitsett",
+}
+CITY_ALIASES_CLOUD = {
+    "brown summit": "browns summit", "highpoint": "high point",
+    "mc leansville": "mcleansville", "pleasant gdn": "pleasant garden",
+}
+
 
 def _drive_minutes(city):
-    import re as _re
-    key = _re.sub(r"[^a-z ]", "", str(city or "").lower()).strip()
-    return CITY_DRIVE_MIN.get(key, DEFAULT_DRIVE_MIN)
+    return geo_policy.drive_minutes(city)
+
+
+def _normalized_city(city):
+    return geo_policy.normalize_city(city)
+
+
+def _geo_filter_enabled():
+    return geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True)
+
+
+def _city_in_whitelist(city):
+    return geo_policy.city_is_allowed(city)
 
 
 def _build_ranked_queue(owner="", limit=5000):
@@ -638,12 +663,19 @@ def _build_ranked_queue(owner="", limit=5000):
     own_p = [owner] if owner else []
     rows, seen = [], set()
     with db.connect() as conn:
-        def phone_of(pid):
-            r = conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=? AND status<>'bad' "
-                             "ORDER BY status='active' DESC LIMIT 1", (pid,)).fetchone()
-            return r["e164"] if r else ""
         def suppressed(e):
             return conn.execute("SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (e,)).fetchone() is not None
+
+        def person_suppressed(pid):
+            return conn.execute("SELECT 1 FROM suppressions WHERE scope='person' AND value=? LIMIT 1", (str(pid),)).fetchone() is not None
+
+        def phone_of(pid):
+            rows = conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=? AND status<>'bad' "
+                                "ORDER BY status='active' DESC", (pid,)).fetchall()
+            for r in rows:
+                if not suppressed(r["e164"]):
+                    return r["e164"]
+            return ""
 
         # future-held: a scheduled call later than now -> keep out of today's list
         held = {r["person_id"] for r in conn.execute(
@@ -660,6 +692,10 @@ def _build_ranked_queue(owner="", limit=5000):
         def add(r, qtype, bucket):
             pid = r["id"]
             if pid in seen or pid in held:
+                return
+            if person_suppressed(pid):
+                return
+            if _geo_filter_enabled() and not _city_in_whitelist(r["city"]):
                 return
             ph = phone_of(pid)
             if not ph or suppressed(ph):

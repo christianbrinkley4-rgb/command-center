@@ -10,6 +10,7 @@ APP_DIR="${APP_DIR:-/opt/command_center}"
 DATA_DIR="${CC_DATA_DIR:-/opt/command_center/data}"
 DOMAIN="${CC_DOMAIN:-}"                 # e.g. cc.ncwealthprotection.me (optional)
 PORT="${COMMAND_CENTER_PORT:-5055}"
+CC_GEO_FILTER_ENABLED="${CC_GEO_FILTER_ENABLED:-true}"
 
 read -rp "Dashboard username [chris]: " CC_USERNAME; CC_USERNAME="${CC_USERNAME:-chris}"
 read -rsp "Dashboard password (required): " CC_PASSWORD; echo
@@ -40,6 +41,7 @@ Environment=CC_INGEST_TOKEN=$CC_INGEST_TOKEN
 Environment=CC_AGENT_TOKEN=$CC_AGENT_TOKEN
 Environment=CC_DATA_DIR=$DATA_DIR
 Environment=COMMAND_CENTER_PORT=$PORT
+Environment=CC_GEO_FILTER_ENABLED=$CC_GEO_FILTER_ENABLED
 ExecStart=$APP_DIR/venv/bin/gunicorn -w 1 -b 127.0.0.1:$PORT app:app
 Restart=always
 [Install]

@@ -30,6 +30,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 import db
+import geo_policy
 
 OUT_COLUMNS = ["Queue_Type", "Name", "Phone", "Address", "City", "County", "Birthday",
                "Last_Disposition", "Last_Call_Time", "Source", "Lead_Score", "person_id"]
@@ -37,6 +38,10 @@ OUT_COLUMNS = ["Queue_Type", "Name", "Phone", "Address", "City", "County", "Birt
 
 def _is_suppressed_phone(conn, e164):
     return conn.execute("SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (e164,)).fetchone() is not None
+
+
+def _is_suppressed_person(conn, pid):
+    return conn.execute("SELECT 1 FROM suppressions WHERE scope='person' AND value=? LIMIT 1", (str(pid),)).fetchone() is not None
 
 
 def build_queue(owner="", limit=2000, did_cap=0):
@@ -55,6 +60,10 @@ def build_queue(owner="", limit=2000, did_cap=0):
         def add(person, qtype):
             pid = person["id"]
             if pid in seen:
+                return
+            if _is_suppressed_person(conn, pid):
+                return
+            if geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True) and not geo_policy.city_is_allowed(person["city"]):
                 return
             ph = phones(pid)
             ph = [x for x in ph if not _is_suppressed_phone(conn, x)]

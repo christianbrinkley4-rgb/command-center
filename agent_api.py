@@ -28,11 +28,19 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request, Response
 
 import db
+import geo_policy
 
 agent_api = Blueprint("agent_api", __name__)
 
 AGENT_TOKEN = os.getenv("CC_AGENT_TOKEN", "")
 VALID_STAGES = {"new", "attempted", "voicemail", "contacted", "callback", "appointment", "dnc"}
+DNC_VALUES = {"DNC", "DO NOT CALL", "DONOTCALL", "DO-NOT-CALL", "DO NOT CONTACT", "OPT OUT", "OPTOUT", "STOP"}
+DNC_NO_VALUES = {"", "NO", "N", "FALSE", "0"}
+DNC_FIELD_NAMES = {"dnc", "do not call", "donotcall", "do not contact", "opt out", "optout"}
+PHONE_FIELD_NAMES = {
+    "phone", "phone number", "phonet", "homephone", "home phone",
+    "mobile", "cell", "cell phone", "number", "telephone", "work phone",
+}
 
 
 # ------------------------------------------------------------------ auth
@@ -54,6 +62,51 @@ def _now():
 
 def _clean(v):
     return "" if v is None else str(v).strip()
+
+
+def _field_name(key):
+    text = str(key or "").strip().lower().replace("_", " ")
+    return " ".join(text.split())
+
+
+def _lead_phones(lead):
+    phone_fields = {p.replace(" ", "") for p in PHONE_FIELD_NAMES}
+    phones, seen = [], set()
+    for key, value in (lead or {}).items():
+        name = _field_name(key)
+        compact = name.replace(" ", "")
+        if (
+            name in PHONE_FIELD_NAMES
+            or compact in phone_fields
+            or "phone" in compact
+            or "mobile" in compact
+            or "cell" in compact
+            or "telephone" in compact
+        ):
+            phone = db.normalize_phone(value)
+            if phone and phone not in seen:
+                phones.append(phone)
+                seen.add(phone)
+    return phones
+
+
+def _lead_value(lead, *names):
+    wanted = {_field_name(name) for name in names}
+    for key, value in (lead or {}).items():
+        if _field_name(key) in wanted:
+            return _clean(value)
+    return ""
+
+
+def _lead_is_dnc(lead):
+    for key, value in (lead or {}).items():
+        name = _field_name(key)
+        text = _clean(value).upper()
+        if text in DNC_VALUES:
+            return True
+        if name in DNC_FIELD_NAMES and text not in DNC_NO_VALUES:
+            return True
+    return False
 
 
 # ------------------------------------------------------------------ discovery
@@ -182,17 +235,32 @@ def leads_import():
         if source:
             conn.execute("INSERT OR IGNORE INTO lead_sources(name, first_seen_at) VALUES (?,?)", (source, _now()))
         for lead in leads:
-            name = _clean(lead.get("name") or f"{_clean(lead.get('first_name'))} {_clean(lead.get('last_name'))}".strip())
-            city = _clean(lead.get("city"))
-            birthday = _clean(lead.get("birthday"))
-            phone = db.normalize_phone(lead.get("phone") or lead.get("mobile") or lead.get("number"))
+            first_name = _lead_value(lead, "first_name", "first name", "firstname")
+            last_name = _lead_value(lead, "last_name", "last name", "lastname")
+            name = _lead_value(lead, "name", "full name", "fullname") or f"{first_name} {last_name}".strip()
+            city = _lead_value(lead, "city", "homecity", "home city", "town")
+            birthday = _lead_value(lead, "birthday", "birthdate", "date of birth", "dob")
+            county = _lead_value(lead, "county", "homecounty", "home county")
+            address = _lead_value(lead, "address", "street address", "home address", "homestreet", "home street")
+            email = _lead_value(lead, "email", "email address")
+            phones = _lead_phones(lead)
+            phone = phones[0] if phones else ""
+
+            if _lead_is_dnc(lead):
+                for p in phones:
+                    conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
+                                 (p, "oscr_dnc", _now()))
+                suppressed += 1
+                continue
+
             key = db.person_key(name, city, birthday) or (f"phone|{phone}" if phone else "")
             if not key:
                 continue
 
-            # Never resurrect an opted-out / DNC number from a freshly pulled list.
-            if phone and conn.execute(
-                    "SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (phone,)).fetchone():
+            # Never resurrect an opted-out / DNC person from a freshly pulled list.
+            if phones and any(conn.execute(
+                    "SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (p,)).fetchone()
+                    for p in phones):
                 suppressed += 1
                 continue
 
@@ -205,7 +273,7 @@ def leads_import():
                     email=COALESCE(NULLIF(email,''), ?), address=COALESCE(NULLIF(address,''), ?),
                     county=COALESCE(NULLIF(county,''), ?), source=COALESCE(NULLIF(source,''), ?)
                     WHERE id=?""",
-                    (_clean(lead.get("email")), _clean(lead.get("address")), _clean(lead.get("county")), source, pid))
+                    (email, address, county, source, pid))
             else:
                 parts = name.split()
                 cur = conn.execute("""INSERT INTO people
@@ -213,12 +281,11 @@ def leads_import():
                      email, source, owner, stage, lead_score, first_seen_at, last_activity_at)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?, 'new', ?, ?, ?)""",
                     (key, name, parts[0] if parts else "", parts[-1] if len(parts) > 1 else "",
-                     birthday, city, _clean(lead.get("county")), _clean(lead.get("address")),
-                     _clean(lead.get("email")), source, owner,
-                     int(lead.get("lead_score") or 50), _now(), _now()))
+                     birthday, city, county, address, email, source, owner,
+                     int(_lead_value(lead, "lead_score", "lead score") or 50), _now(), _now()))
                 pid = cur.lastrowid
                 imported += 1
-            if phone:
+            for phone in phones:
                 conn.execute("INSERT OR IGNORE INTO phone_numbers(person_id, e164, created_at) VALUES (?,?,?)",
                              (pid, phone, _now()))
             person_ids.append(pid)
@@ -259,6 +326,7 @@ def _ensure_columns():
 @agent_api.route("/agent/leads/call-queue")
 def call_queue():
     limit = min(int(request.args.get("limit", 100)), 1000)
+    fetch_limit = min(limit * 5, 5000) if geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True) else limit
     owner = _clean(request.args.get("owner"))
     min_score = request.args.get("min_score")
     where = ["stage IN ('new','attempted','voicemail','callback')"]
@@ -267,19 +335,32 @@ def call_queue():
         where.append("owner=?"); params.append(owner)
     if min_score:
         where.append("lead_score>=?"); params.append(int(min_score))
+    where.append("NOT EXISTS (SELECT 1 FROM suppressions sp WHERE sp.scope='person' AND sp.value=CAST(p.id AS TEXT))")
+    where.append("""EXISTS (
+        SELECT 1 FROM phone_numbers ph
+        WHERE ph.person_id=p.id AND ph.status='active'
+          AND NOT EXISTS (SELECT 1 FROM suppressions ss WHERE ss.scope='phone' AND ss.value=ph.e164)
+    )""")
     with db.connect() as conn:
         rows = conn.execute(f"""
             SELECT p.id, p.full_name, p.city, p.county, p.birthday, p.source, p.owner,
                    p.lead_score, p.stage, p.last_activity_at,
-                   (SELECT e164 FROM phone_numbers x WHERE x.person_id=p.id AND x.status='active' LIMIT 1) phone,
+                   (SELECT e164 FROM phone_numbers x
+                    WHERE x.person_id=p.id AND x.status='active'
+                      AND NOT EXISTS (SELECT 1 FROM suppressions ss WHERE ss.scope='phone' AND ss.value=x.e164)
+                    LIMIT 1) phone,
                    (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=p.id) call_count,
                    (SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id
                     ORDER BY dialed_at DESC LIMIT 1) last_outcome
             FROM people p
             WHERE {' AND '.join(where)}
             ORDER BY (stage='callback') DESC, lead_score DESC, last_activity_at ASC
-            LIMIT ?""", params + [limit]).fetchall()
-    return jsonify({"count": len(rows), "leads": [dict(r) for r in rows]})
+            LIMIT ?""", params + [fetch_limit]).fetchall()
+    leads = [dict(r) for r in rows]
+    if geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True):
+        leads = [r for r in leads if geo_policy.city_is_allowed(r.get("city", ""))]
+    leads = leads[:limit]
+    return jsonify({"count": len(leads), "leads": leads})
 
 
 @agent_api.route("/agent/leads/score", methods=["POST"])
