@@ -117,6 +117,27 @@ def _insert_call(conn, pid, agent, row):
         return None, None  # duplicate (already imported) — idempotent no-op
 
 
+def _apply_disposition_side_effects(conn, pid, row):
+    """Keep cloud queue eligibility aligned with the dialer's local resume rules."""
+    phone = db.normalize_phone(row.get("Phone"))
+    disposition = _clean(row.get("disposition")).lower()
+    category = db.disposition_category(disposition)
+    now = _clean(row.get("disposition_time")) or datetime.now().isoformat(timespec="seconds")
+
+    if phone and category == "bad_number":
+        conn.execute("UPDATE phone_numbers SET status='bad' WHERE e164=?", (phone,))
+        if disposition == "spam_blocked":
+            conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
+                         (phone, "spam_blocked", now))
+
+    if category == "dnc":
+        conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('person',?,?,?)",
+                     (str(pid), disposition or "dnc", now))
+        for r in conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=?", (pid,)):
+            conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
+                         (r["e164"], disposition or "dnc", now))
+
+
 def _refresh_person_rollup(conn, pid):
     """Recompute a person's stage, owner, last activity, and a simple lead score
     from all their calls."""
@@ -161,6 +182,7 @@ def import_file(conn, agent, path):
         if not pid:
             continue
         category, _ = _insert_call(conn, pid, agent, row)
+        _apply_disposition_side_effects(conn, pid, row)
         if category is not None:
             new_calls += 1
         touched.add(pid)
