@@ -142,7 +142,7 @@ main{padding:24px 26px 60px;max-width:1480px;margin:0 auto}
 /* ---------- lead detail ---------- */
 .back{width:auto;padding:8px 14px;margin-bottom:16px}
 .lead-detail{display:grid;grid-template-columns:330px 1fr;gap:18px;align-items:start}
-.contact-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px;box-shadow:var(--shadow);position:sticky;top:88px}
+.contact-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px;box-shadow:var(--shadow);position:sticky;top:88px;max-height:calc(100vh - 110px);overflow-y:auto}
 .cc-name{font-size:22px;font-weight:800;letter-spacing:-.01em}
 .cc-meta{color:var(--muted);font-size:13px;margin-top:3px}
 .cc-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px}
@@ -286,3 +286,13 @@ main{padding:24px 26px 60px;max-width:1480px;margin:0 auto}
 .brief-list{list-style:none;display:flex;flex-wrap:wrap;gap:8px 22px}
 .brief-list li{font-size:13px;color:var(--txt);position:relative;padding-left:16px}
 .brief-list li::before{content:"›";position:absolute;left:0;color:var(--cyan);font-weight:800}
+
+
+/* ================= message preview (lead card) ================= */
+.msg-preview{margin-top:16px}
+.msg-head{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.msg-badge{font-size:10px;padding:2px 8px;border-radius:999px;font-weight:700;letter-spacing:.02em}
+.msg-badge.preview{background:rgba(251,191,36,.14);color:var(--amber)}
+.msg-badge.live{background:rgba(52,211,153,.14);color:var(--green)}
+.msg-bubble{background:linear-gradient(135deg,#1d4ed8,#2563eb);color:#fff;padding:12px 15px;border-radius:14px 14px 14px 4px;font-size:13.5px;line-height:1.45;box-shadow:0 4px 14px rgba(37,99,235,.3)}
+.msg-note{font-size:11.5px;color:var(--muted2);margin-top:8px}

@@ -110,6 +110,48 @@ def _phone_of(conn, person_id):
     return r["e164"] if r else ""
 
 
+# Per-agent caller IDs so texts come from the same number that called the prospect.
+AGENT_FROM = {
+    "chris": os.getenv("CC_FROM_CHRIS", "+13369622307"),
+    "will": os.getenv("CC_FROM_WILL", "+13366451062"),
+}
+AGENT_PHONE_DISPLAY = {
+    "chris": "(336) 962-2307",
+    "will": "(336) 740-2604",
+}
+
+
+def _person_for_message(conn, pid):
+    """Assemble the person dict the templates need (name parts, city, owner, agent phone)."""
+    r = conn.execute("SELECT id, full_name, first_name, city, county, owner FROM people WHERE id=?",
+                     (pid,)).fetchone()
+    if not r:
+        return {}
+    d = dict(r)
+    d["agent_phone"] = AGENT_PHONE_DISPLAY.get((d.get("owner") or "").lower(), "")
+    return d
+
+
+def _best_from(conn, pid):
+    """The DID to text from: the number that last called this person if it's one of
+    ours, else the owner's default DID."""
+    last = conn.execute(
+        "SELECT from_number FROM call_attempts WHERE person_id=? AND from_number<>'' ORDER BY dialed_at DESC LIMIT 1",
+        (pid,)).fetchone()
+    owner = (conn.execute("SELECT owner FROM people WHERE id=?", (pid,)).fetchone() or {"owner": ""})["owner"]
+    if last and last["from_number"]:
+        return last["from_number"].split(",")[0].strip()
+    return AGENT_FROM.get((owner or "").lower(), "")
+
+
+def _render(person, template_key, channel, last_call_at):
+    try:
+        import message_templates as mt
+        return mt.render(template_key, person, last_call_at=last_call_at, channel=channel)
+    except Exception:
+        return None
+
+
 def schedule_task(conn, person_id, kind, due_at, reason, channel_to="", payload="", owner="", dedupe_key=""):
     """Insert a scheduled task (idempotent via dedupe_key). Returns task id or None."""
     if not dedupe_key:
@@ -256,23 +298,45 @@ def fire_due_tasks(now=None, sms_sender=None, email_sender=None):
                 _alog(conn, pid, "call_due", t["reason"])
 
             elif kind in ("sms", "email"):
-                body = t["payload"]
-                sender = sms_sender if kind == "sms" else email_sender
-                status = "queued"
-                if sender:
-                    try:
-                        sender(person_id=pid, to=phone if kind == "sms" else t["email"],
-                               template=t["payload"], reason=t["reason"])
+                # Build the personalized message from the template + this person's live data.
+                person = _person_for_message(conn, pid)
+                last_call = conn.execute(
+                    "SELECT dialed_at FROM call_attempts WHERE person_id=? ORDER BY dialed_at DESC LIMIT 1",
+                    (pid,)).fetchone()
+                last_call_at = last_call["dialed_at"] if last_call else None
+                rendered = _render(person, t["payload"] or t["reason"], kind, last_call_at)
+                body = rendered["body"] if rendered else (t["payload"] or "")
+                subject = rendered.get("subject", "") if rendered else ""
+
+                # Frequency cap: never more than 1 outbound of a channel per person per day.
+                already = conn.execute(
+                    "SELECT COUNT(*) n FROM messages WHERE person_id=? AND channel=? AND direction='out' "
+                    "AND substr(created_at,1,10)=?", (pid, kind, _iso(now)[:10])).fetchone()["n"]
+                if already:
+                    conn.execute("UPDATE scheduled_tasks SET status='cancelled', fired_at=? WHERE id=?",
+                                 (_iso(now), t["id"]))
+                    continue
+
+                status = "queued"   # default: built + recorded, not physically sent (senders gated off)
+                try:
+                    import senders
+                    if kind == "sms" and senders.sms_enabled() and phone and body:
+                        senders.send_sms(phone, body, from_number=_best_from(conn, pid))
                         status = "sent"
-                    except Exception as exc:
-                        _alog(conn, pid, f"{kind}_send_error", str(exc)[:120])
-                # record the outbound message (queued or sent) so history + caps work
+                    elif kind == "email" and senders.email_enabled() and t["email"] and body:
+                        senders.send_email(t["email"], subject or "A quick follow-up", body)
+                        status = "sent"
+                except Exception as exc:
+                    status = "failed"
+                    _alog(conn, pid, f"{kind}_send_error", str(exc)[:120])
+
                 conn.execute(
-                    """INSERT INTO messages(person_id, channel, direction, body, status, template_id, created_at, sent_at)
-                       VALUES (?,?, 'out', ?, ?, ?, ?, ?)""",
-                    (pid, kind, body, status, t["payload"], _iso(now), _iso(now) if status == "sent" else ""))
+                    """INSERT INTO messages(person_id, channel, direction, subject, body, status, template_id, created_at, sent_at)
+                       VALUES (?,?, 'out', ?, ?, ?, ?, ?, ?)""",
+                    (pid, kind, subject, body, status, t["payload"], _iso(now), _iso(now) if status == "sent" else ""))
+                # keep failed tasks pending for retry; sent/queued are done
                 conn.execute("UPDATE scheduled_tasks SET status=?, fired_at=? WHERE id=?",
-                             ("sent" if status in ("sent", "queued") else "pending", _iso(now), t["id"]))
+                             ("pending" if status == "failed" else "sent", _iso(now), t["id"]))
                 fired[kind] += 1
                 _alog(conn, pid, f"{kind}_fired", f"{t['reason']} ({status})")
     return fired

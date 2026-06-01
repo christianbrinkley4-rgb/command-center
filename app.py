@@ -532,6 +532,40 @@ def api_insights():
     return jsonify(learning.get_stats())
 
 
+@app.route("/api/message-preview")
+def api_message_preview():
+    """Show exactly what a personalized message would say for a given lead+template.
+    Lets you SEE the automation's output before anything is ever sent."""
+    import message_templates as mt
+    pid = request.args.get("person_id")
+    template = (request.args.get("template") or "post_voicemail_text").strip()
+    channel = (request.args.get("channel") or "sms").strip()
+    with db.connect() as conn:
+        if pid:
+            r = conn.execute("SELECT id, full_name, first_name, city, county, owner, email FROM people WHERE id=?",
+                             (pid,)).fetchone()
+            person = dict(r) if r else {}
+            last = conn.execute("SELECT dialed_at FROM call_attempts WHERE person_id=? ORDER BY dialed_at DESC LIMIT 1",
+                                (pid,)).fetchone()
+            last_call = last["dialed_at"] if last else None
+        else:
+            person = {"full_name": "Sharon Miller", "first_name": "Sharon", "city": "Greensboro",
+                      "county": "Guilford", "owner": "chris"}
+            last_call = (datetime.now() - timedelta(days=1)).isoformat()
+        from automation import AGENT_PHONE_DISPLAY
+        person["agent_phone"] = AGENT_PHONE_DISPLAY.get((person.get("owner") or "").lower(), "")
+        rendered = mt.render(template, person, last_call_at=last_call, channel=channel)
+    return jsonify({"template": template, "channel": channel, "rendered": rendered,
+                    "available_templates": mt.list_templates()})
+
+
+@app.route("/api/sms-status")
+def api_sms_status():
+    """Tell the UI whether live sending is on (so it can show 'preview only' vs 'live')."""
+    import senders
+    return jsonify({"sms_live": senders.sms_enabled(), "email_live": senders.email_enabled()})
+
+
 @app.route("/api/automations/run", methods=["POST"])
 def api_run_automations():
     """Manually fire due tasks now (the worker also does this every minute)."""

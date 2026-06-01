@@ -343,11 +343,27 @@ async function openLead(id) {
     <div class="cc-actions">
       <button class="btn btn-primary" onclick="actAppt(${id})">＋ Set Appointment</button>
       <button class="btn btn-soft" onclick="actNote(${id})">＋ Add Note</button>
+      <button class="btn btn-soft" onclick="previewMsg(${id})">✉ Preview Message</button>
       <button class="btn btn-soft" onclick="actStage(${id},'callback')">Mark Callback</button>
       <button class="btn btn-danger" onclick="actStage(${id},'dnc')">Do Not Call</button>
-    </div>`;
+    </div>
+    <div id="msgPreview" class="msg-preview"></div>`;
   $("#timeline").innerHTML = d.timeline.slice().reverse().map(renderTL).join("") || `<div class="muted">No activity yet.</div>`;
   showView("lead");
+}
+async function previewMsg(id) {
+  const box = $("#msgPreview");
+  box.innerHTML = `<div class="muted" style="padding:10px">Rendering…</div>`;
+  const [m, status] = await Promise.all([
+    (await fetch(`/api/message-preview?person_id=${id}&template=post_voicemail_text&channel=sms`)).json(),
+    (await fetch("/api/sms-status")).json(),
+  ]);
+  const live = status.sms_live;
+  box.innerHTML = `
+    <div class="msg-head">What this lead would receive
+      <span class="msg-badge ${live ? 'live' : 'preview'}">${live ? '● LIVE sending' : 'PREVIEW only'}</span></div>
+    <div class="msg-bubble">${esc(m.rendered ? m.rendered.body : "—")}</div>
+    <div class="msg-note">Auto-personalized from their data. ${live ? 'Texts send automatically.' : 'Not sent until you enable live texting (after A2P approval).'}</div>`;
 }
 function renderTL(t) {
   if (t.type === "call") {
