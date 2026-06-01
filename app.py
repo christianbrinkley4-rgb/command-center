@@ -19,6 +19,7 @@ from flask import Flask, jsonify, request, render_template, Response
 import db
 import sync
 import geo_policy
+import queue_policy
 from agent_api import agent_api, _ensure_columns as _agent_ensure_columns
 
 app = Flask(__name__)
@@ -171,6 +172,8 @@ def api_action_queue():
     prioritized 'call next' list (best-scoring leads not yet reached)."""
     today = date.today().isoformat()
     owner = (request.args.get("owner") or "").strip().lower()
+    agenda_day = _request_agenda_day()
+    city_filter = _agenda_city(owner, agenda_day, request.args.get("city") if "city" in request.args else None)
     own_sql = " AND owner=?" if owner else ""
     own_p = [owner] if owner else []
     with db.connect() as conn:
@@ -213,19 +216,37 @@ def api_action_queue():
             "callbacks_due": len(callbacks),
         }
     # 'Call Next' uses the SAME ranking the dialer pulls, so dashboard order == dialer order.
-    ranked = _build_ranked_queue(owner, limit=60)
+    ranked_all = _build_ranked_queue(owner, limit=5000, agenda_date=agenda_day, city_filter=city_filter)
+    ranked = ranked_all[:500]
+    agenda_all_cities = _build_ranked_queue(owner, limit=5000, agenda_date=agenda_day, city_filter="")
+    city_counts = {}
+    for item in agenda_all_cities:
+        city = item["City"] or "Unknown"
+        city_counts[city] = city_counts.get(city, 0) + 1
     call_next = []
     for r in ranked:
         call_next.append({
             "id": r["person_id"], "full_name": r["Name"], "city": r["City"], "county": r["County"],
             "phone": r["Phone"], "source": r["Source"], "lead_score": r["Lead_Score"],
             "stage": r["Queue_Type"], "age": _age(r["Birthday"]),
+            "attempt_count": r.get("Attempt_Count", 0),
+            "attempts_remaining": r.get("Attempts_Remaining", 0),
+            "last_disposition": r.get("Last_Disposition", ""),
+            "last_call_time": r.get("Last_Call_Time", ""),
             "reason": {"scheduled_call": "Scheduled callback due", "callback": "Callback requested",
                        "hot_fresh": "🔥 Fresh lead", "never_called": "Never called",
                        "retry": "Retry"}.get(r["Queue_Type"], r["Queue_Type"]),
         })
+    agenda = {
+        "date": agenda_day.isoformat(),
+        "city_filter": city_filter,
+        "total": len(ranked_all),
+        "unfiltered_total": len(agenda_all_cities),
+        "city_options": [{"city": k, "count": v} for k, v in sorted(city_counts.items(), key=lambda x: (-x[1], x[0]))],
+    }
     return jsonify({"hero": hero, "callbacks": callbacks, "appointments": appointments,
-                    "call_next": call_next, "synced_at": datetime.now().strftime("%I:%M:%S %p")})
+                    "call_next": call_next, "agenda": agenda,
+                    "synced_at": datetime.now().strftime("%I:%M:%S %p")})
 
 
 # ----------------------------- API: leads -----------------------------
@@ -674,17 +695,102 @@ def _city_in_whitelist(city):
     return geo_policy.city_is_allowed(city)
 
 
-def _build_ranked_queue(owner="", limit=5000):
+AGENDA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agenda_settings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    agenda_date TEXT NOT NULL,
+    owner       TEXT NOT NULL DEFAULT '',
+    city_filter TEXT NOT NULL DEFAULT '',
+    notes       TEXT NOT NULL DEFAULT '',
+    updated_at  TEXT NOT NULL,
+    UNIQUE(agenda_date, owner)
+);
+"""
+
+
+def _ensure_agenda_schema():
+    with db.connect() as conn:
+        conn.executescript(AGENDA_SCHEMA)
+
+
+def _request_agenda_day():
+    return queue_policy.coerce_day(request.args.get("date") or request.args.get("agenda_date"))
+
+
+def _agenda_settings(owner="", agenda_day=None):
+    _ensure_agenda_schema()
+    owner = (owner or "").strip().lower()
+    agenda_day = queue_policy.coerce_day(agenda_day)
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT city_filter, notes FROM agenda_settings WHERE agenda_date=? AND owner=?",
+            (agenda_day.isoformat(), owner),
+        ).fetchone()
+    return {
+        "date": agenda_day.isoformat(),
+        "owner": owner,
+        "city_filter": row["city_filter"] if row else "",
+        "notes": row["notes"] if row else "",
+    }
+
+
+def _save_agenda_settings(owner, agenda_day, city_filter="", notes=""):
+    _ensure_agenda_schema()
+    owner = (owner or "").strip().lower()
+    agenda_day = queue_policy.coerce_day(agenda_day)
+    city_filter = (city_filter or "").strip()
+    notes = (notes or "").strip()
+    now = datetime.now().isoformat(timespec="seconds")
+    with db.connect() as conn:
+        conn.execute(
+            """INSERT INTO agenda_settings(agenda_date, owner, city_filter, notes, updated_at)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(agenda_date, owner) DO UPDATE SET
+                 city_filter=excluded.city_filter,
+                 notes=excluded.notes,
+                 updated_at=excluded.updated_at""",
+            (agenda_day.isoformat(), owner, city_filter, notes, now),
+        )
+    return _agenda_settings(owner, agenda_day)
+
+
+def _agenda_city(owner="", agenda_day=None, override=None):
+    if override is not None:
+        return (override or "").strip()
+    return _agenda_settings(owner, agenda_day).get("city_filter", "")
+
+
+def _agenda_window(agenda_day):
+    agenda_day = queue_policy.coerce_day(agenda_day)
+    if agenda_day == date.today():
+        return datetime.now().isoformat(timespec="seconds")
+    return f"{agenda_day.isoformat()}T23:59:59"
+
+
+def _city_matches_filter(city, city_filter):
+    if not city_filter:
+        return True
+    return _normalized_city(city) == _normalized_city(city_filter)
+
+
+def _build_ranked_queue(owner="", limit=5000, agenda_date=None, city_filter=None):
     """THE single ranking used everywhere — the dialer's call list AND the dashboard's
     'Call Next' both call this, so their order is ALWAYS identical. Priority:
     scheduled-calls-due > callbacks > hot fresh > new(by score) > retry, and within
     each tier: score desc -> closest city -> name. Excludes DNC/suppressed/future-held."""
     owner = (owner or "").strip().lower()
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    agenda_day = queue_policy.coerce_day(agenda_date)
+    due_cutoff = _agenda_window(agenda_day)
     cutoff_24h = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
     own = " AND p.owner=?" if owner else ""
     own_p = [owner] if owner else []
+    city_filter = (city_filter or "").strip()
     rows, seen = [], set()
+    try:
+        import automation
+        automation.ensure_schema()
+    except Exception:
+        pass
     with db.connect() as conn:
         def suppressed(e):
             return conn.execute("SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (e,)).fetchone() is not None
@@ -700,16 +806,22 @@ def _build_ranked_queue(owner="", limit=5000):
                     return r["e164"]
             return ""
 
-        # future-held: a scheduled call later than now -> keep out of today's list
+        # Future-held: a scheduled call after this agenda day stays off this day.
         held = {r["person_id"] for r in conn.execute(
-            "SELECT DISTINCT person_id FROM scheduled_tasks WHERE kind='call' AND status='pending' AND due_at>?", (now_iso,))}
-        due = {r["person_id"] for r in conn.execute(
-            "SELECT DISTINCT person_id FROM scheduled_tasks WHERE kind='call' AND status='pending' AND due_at<=?", (now_iso,))}
+            "SELECT DISTINCT person_id FROM scheduled_tasks WHERE kind='call' AND status='pending' AND due_at>?", (due_cutoff,))}
+        due_rows = conn.execute(
+            "SELECT person_id, reason FROM scheduled_tasks WHERE kind='call' AND status='pending' AND due_at<=?",
+            (due_cutoff,)).fetchall()
+        due = {r["person_id"] for r in due_rows}
+        due_auto_retry = {r["person_id"] for r in due_rows if queue_policy.is_auto_retry_reason(r["reason"])}
+        due_warm = due - due_auto_retry
         held -= due
 
         base = (f"SELECT p.id, p.full_name, p.city, p.county, p.birthday, p.address, p.source, "
                 f"p.lead_score, p.stage, p.last_activity_at, p.owner, "
-                f"(SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id ORDER BY dialed_at DESC LIMIT 1) last_outcome "
+                f"(SELECT disposition FROM call_attempts c WHERE c.person_id=p.id ORDER BY dialed_at DESC LIMIT 1) last_disposition, "
+                f"(SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id ORDER BY dialed_at DESC LIMIT 1) last_outcome, "
+                f"(SELECT dialed_at FROM call_attempts c WHERE c.person_id=p.id ORDER BY dialed_at DESC LIMIT 1) last_call_time "
                 f"FROM people p WHERE p.stage<>'dnc' AND p.stage<>'closed'{own}")
 
         def add(r, qtype, bucket):
@@ -722,14 +834,25 @@ def _build_ranked_queue(owner="", limit=5000):
                 return
             if _geo_filter_enabled() and not _city_in_whitelist(r["city"]):
                 return
+            if not _city_matches_filter(r["city"], city_filter):
+                return
             ph = phone_of(pid)
             if not ph or suppressed(ph):
                 return
+            status = queue_policy.retry_status(conn, pid, ph, r["stage"], qtype, agenda_day)
+            if not status["allowed"]:
+                return
+            latest = status.get("latest") or {}
             seen.add(pid)
             bucket.append({"Queue_Type": qtype, "Name": r["full_name"] or "", "Phone": ph,
                            "Address": r["address"] or "", "City": r["city"] or "", "County": r["county"] or "",
-                           "Birthday": r["birthday"] or "", "Last_Disposition": r["last_outcome"] or "",
-                           "Last_Call_Time": r["last_activity_at"] or "", "Source": r["source"] or "",
+                           "Birthday": r["birthday"] or "", "Last_Disposition": latest.get("disposition") or r["last_disposition"] or "",
+                           "Last_Outcome": latest.get("disposition_category") or r["last_outcome"] or "",
+                           "Last_Call_Time": latest.get("dialed_at") or r["last_call_time"] or "",
+                           "Attempt_Count": status["attempts"],
+                           "Attempts_Remaining": status["attempts_remaining"],
+                           "Agenda_Date": agenda_day.isoformat(),
+                           "Source": r["source"] or "",
                            "Lead_Score": r["lead_score"], "person_id": pid,
                            "_drive": _drive_minutes(r["city"])})
 
@@ -740,9 +863,9 @@ def _build_ranked_queue(owner="", limit=5000):
             return b
 
         t_sched, t_call, t_hot, t_new, t_retry = [], [], [], [], []
-        if due:
-            q = base + " AND p.id IN ({})".format(",".join("?" * len(due)))
-            for r in conn.execute(q, own_p + list(due)):
+        if due_warm:
+            q = base + " AND p.id IN ({})".format(",".join("?" * len(due_warm)))
+            for r in conn.execute(q, own_p + list(due_warm)):
                 add(r, "scheduled_call", t_sched)
         for r in conn.execute(base + " AND p.stage='callback'", own_p):
             add(r, "callback", t_call)
@@ -753,8 +876,10 @@ def _build_ranked_queue(owner="", limit=5000):
         for r in conn.execute(base + " AND p.stage IN ('attempted','voicemail')", own_p):
             add(r, "retry", t_retry)
 
-        for tier in (t_sched, t_call, t_hot, t_new, t_retry):
+        for tier in (t_sched, t_call, t_hot, t_new):
             rows.extend(sort_tier(tier))
+        t_retry.sort(key=lambda x: (-(x["Lead_Score"] or 0), x["Last_Call_Time"] or "", x["_drive"], x["Name"]))
+        rows.extend(t_retry)
         # strip internal sort key from the response
         for x in rows:
             x.pop("_drive", None)
@@ -766,8 +891,62 @@ def api_dialer_queue():
     """The dialer pulls this exact ranked list (single source of truth)."""
     owner = (request.args.get("owner") or "").strip().lower()
     limit = min(int(request.args.get("limit", 1000)), 5000)
-    rows = _build_ranked_queue(owner, limit)
-    return jsonify({"count": len(rows), "queue": rows})
+    agenda_day = _request_agenda_day()
+    city_filter = _agenda_city(owner, agenda_day, request.args.get("city") if "city" in request.args else None)
+    rows = _build_ranked_queue(owner, limit, agenda_day, city_filter)
+    return jsonify({
+        "count": len(rows),
+        "queue": rows,
+        "agenda": {"date": agenda_day.isoformat(), "owner": owner, "city_filter": city_filter},
+    })
+
+
+@app.route("/api/agenda")
+def api_agenda():
+    """Show the call agenda for a day, using the same order the dialer exports."""
+    owner = (request.args.get("owner") or "").strip().lower()
+    agenda_day = _request_agenda_day()
+    city_filter = _agenda_city(owner, agenda_day, request.args.get("city") if "city" in request.args else None)
+    limit = min(int(request.args.get("limit", 5000)), 5000)
+    unfiltered = _build_ranked_queue(owner, 5000, agenda_day, "")
+    filtered = _build_ranked_queue(owner, 5000, agenda_day, city_filter)
+    rows = filtered[:limit]
+
+    by_type, by_city = {}, {}
+    for r in filtered:
+        by_type[r["Queue_Type"]] = by_type.get(r["Queue_Type"], 0) + 1
+    for r in unfiltered:
+        city = r["City"] or "Unknown"
+        by_city[city] = by_city.get(city, 0) + 1
+    city_options = [{"city": k, "count": v} for k, v in sorted(by_city.items(), key=lambda x: (-x[1], x[0]))]
+    settings = _agenda_settings(owner, agenda_day)
+    return jsonify({
+        "agenda": {
+            "date": agenda_day.isoformat(),
+            "owner": owner,
+            "city_filter": city_filter,
+            "saved_city_filter": settings.get("city_filter", ""),
+            "notes": settings.get("notes", ""),
+            "total": len(filtered),
+            "unfiltered_total": len(unfiltered),
+            "by_type": by_type,
+            "city_options": city_options,
+        },
+        "queue": rows,
+        "synced_at": datetime.now().strftime("%I:%M:%S %p"),
+    })
+
+
+@app.route("/api/agenda/settings", methods=["POST"])
+def api_agenda_settings():
+    d = request.json or {}
+    owner = (d.get("owner") or "").strip().lower()
+    agenda_day = queue_policy.coerce_day(d.get("date") or d.get("agenda_date"))
+    city_filter = (d.get("city_filter") or d.get("city") or "").strip()
+    if city_filter and _geo_filter_enabled() and not _city_in_whitelist(city_filter):
+        return jsonify({"error": f"{city_filter} is outside the 30-minute Greensboro whitelist"}), 400
+    settings = _save_agenda_settings(owner, agenda_day, city_filter, d.get("notes", ""))
+    return jsonify({"ok": True, "agenda": settings})
 
 
 @app.route("/api/pipeline")

@@ -3,6 +3,12 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 let charts = {}, leadState = { q: "", stage: "", sort: "last_activity_at" }, currentLead = null, activeView = "today";
 let ownerFilter = "";  // "", "chris", or "will"
+const localDateISO = () => {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 10);
+};
+let agendaState = { date: localDateISO(), city: "" };
 
 /* ---------------- toast ---------------- */
 let toastTimer;
@@ -94,8 +100,51 @@ $$("#ownerToggle .ot").forEach(b => b.onclick = () => {
 });
 
 /* ---------------- TODAY / action queue ---------------- */
+function agendaParams() {
+  const p = new URLSearchParams();
+  if (ownerFilter) p.set("owner", ownerFilter);
+  if (agendaState.date) p.set("date", agendaState.date);
+  if (agendaState.city) p.set("city", agendaState.city);
+  return p.toString() ? "?" + p.toString() : "";
+}
+function renderAgenda(a) {
+  if (!a) return;
+  agendaState.date = a.date || agendaState.date;
+  agendaState.city = a.city_filter || "";
+  if (document.activeElement !== $("#agendaDate")) $("#agendaDate").value = agendaState.date;
+  if (document.activeElement !== $("#agendaCity")) $("#agendaCity").value = agendaState.city;
+  const target = agendaState.city ? `${agendaState.city} only` : "all eligible cities";
+  $("#agendaSummary").textContent = `${a.total || 0} calls planned for ${agendaState.date} (${target})`;
+  $("#agendaCities").innerHTML = (a.city_options || []).map(c => `<option value="${esc(c.city)}">${c.count}</option>`).join("");
+  $("#agendaCityChips").innerHTML = (a.city_options || []).slice(0, 10).map(c =>
+    `<button class="agenda-chip ${agendaState.city === c.city ? 'active' : ''}" onclick="setAgendaCity('${esc(c.city)}')">${esc(c.city)} <span>${c.count}</span></button>`
+  ).join("");
+}
+function setAgendaCity(city) {
+  agendaState.city = city;
+  $("#agendaCity").value = city;
+  saveAgenda();
+}
+async function saveAgenda() {
+  const payload = {
+    owner: ownerFilter,
+    date: $("#agendaDate").value || agendaState.date,
+    city_filter: $("#agendaCity").value.trim(),
+  };
+  const r = await fetch("/api/agenda/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const j = await r.json();
+  if (j.error) { toast(j.error, "err"); return; }
+  agendaState.date = payload.date;
+  agendaState.city = payload.city_filter;
+  toast(agendaState.city ? "Agenda set to " + agendaState.city : "Agenda set to all cities");
+  loadToday();
+}
+$("#agendaApplyBtn") && ($("#agendaApplyBtn").onclick = saveAgenda);
+$("#agendaClearBtn") && ($("#agendaClearBtn").onclick = () => { $("#agendaCity").value = ""; saveAgenda(); });
+$("#agendaDate") && ($("#agendaDate").onchange = () => { agendaState.date = $("#agendaDate").value || agendaState.date; loadToday(); });
+
 async function loadToday() {
-  const qs = ownerFilter ? "?owner=" + ownerFilter : "";
+  const qs = agendaParams();
   fetch("/api/briefing").then(r => r.json()).then(b => {
     const hour = new Date().getHours();
     const greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -103,6 +152,7 @@ async function loadToday() {
       <ul class="brief-list">${b.lines.map(l => `<li>${esc(l)}</li>`).join("")}</ul>`;
   });
   const d = await (await fetch("/api/action-queue" + qs)).json();
+  renderAgenda(d.agenda);
   const h = d.hero;
   $("#heroAppts").textContent = h.appointments_total;
   $("#heroApptsToday").textContent = h.appointments_today ? `+${h.appointments_today} today` : "none today yet";
@@ -114,7 +164,7 @@ async function loadToday() {
 
   $("#cbCount").textContent = d.callbacks.length;
   $("#apCount").textContent = d.appointments.length;
-  $("#cnCount").textContent = d.call_next.length;
+  $("#cnCount").textContent = d.agenda ? d.agenda.total : d.call_next.length;
 
   $("#callbackList").innerHTML = d.callbacks.map(c => qRow(c, "callback")).join("")
     || emptyState("No callbacks due", "When someone asks for a callback, they show up here first.");
@@ -127,7 +177,10 @@ async function loadToday() {
 function qRow(c, kind) {
   (window._lastLeads = window._lastLeads || {})[c.id] = c.full_name || ("Lead #" + c.id);
   const where = [c.city, c.county ? c.county + " Co." : ""].filter(Boolean).join(", ");
-  const meta = [c.age ? "Age " + c.age : "", where, c.reason || ""].filter(Boolean).join(" · ");
+  const maxAttempts = (Number(c.attempt_count || 0) + Number(c.attempts_remaining || 0)) || 4;
+  const attempt = c.attempt_count !== undefined ? `prior calls ${c.attempt_count}/${maxAttempts}` : "";
+  const last = c.last_disposition ? `last ${c.last_disposition.replace(/_/g, " ")} ${fmtClock(c.last_call_time)}` : "";
+  const meta = [where, c.source ? "source " + c.source : "", c.reason || "", attempt, last, c.age ? "Age " + c.age : ""].filter(Boolean).join(" | ");
   return `<div class="q-row" onclick="openLead(${c.id})">
     <div class="q-av">${esc(initials(c.full_name))}</div>
     <div class="q-main">

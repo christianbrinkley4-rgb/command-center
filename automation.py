@@ -21,6 +21,7 @@ import os
 from datetime import datetime, timedelta, time as dtime
 
 import db
+import queue_policy
 
 # ---------------------------------------------------------------- schema
 
@@ -196,14 +197,15 @@ def plan_next_action(conn, person_id, disposition, category, owner=""):
         if phone:
             add("sms", now + timedelta(minutes=10), "post_voicemail_text",
                 payload="vm_followup")
-        add("call", now + timedelta(days=2), "redial_after_voicemail")
+        if queue_policy.attempt_count(conn, person_id, phone) < queue_policy.max_attempts():
+            add("call", now + timedelta(days=2), "redial_after_voicemail")
 
     elif category == "no_answer":
         # No answer -> retry in the next good window, escalating spacing.
         n = conn.execute(
             "SELECT COUNT(*) c FROM call_attempts WHERE person_id=? AND disposition_category='no_answer'",
             (person_id,)).fetchone()["c"]
-        if n <= 4:
+        if n < queue_policy.max_attempts():
             spacing = [1, 2, 3, 5][min(n - 1, 3)] if n else 1
             add("call", _next_good_call(now + timedelta(days=spacing)), f"retry_no_answer_{n}")
 
@@ -289,9 +291,13 @@ def fire_due_tasks(now=None, sms_sender=None, email_sender=None):
                 continue
 
             if kind == "call":
-                # Surface it: mark the person so the action queue shows them today, keep task done.
-                conn.execute("UPDATE people SET stage=CASE WHEN stage='dnc' THEN 'dnc' ELSE 'callback' END, "
-                             "last_activity_at=? WHERE id=?", (_iso(now), pid))
+                # Surface it. Warm callbacks go to the callback tier; automatic
+                # redials stay in attempted/voicemail so untouched leads still go first.
+                if queue_policy.is_auto_retry_reason(t["reason"]):
+                    conn.execute("UPDATE people SET last_activity_at=? WHERE id=?", (_iso(now), pid))
+                else:
+                    conn.execute("UPDATE people SET stage=CASE WHEN stage='dnc' THEN 'dnc' ELSE 'callback' END, "
+                                 "last_activity_at=? WHERE id=?", (_iso(now), pid))
                 conn.execute("UPDATE scheduled_tasks SET status='done', fired_at=? WHERE id=?",
                              (_iso(now), t["id"]))
                 fired["call_ready"] += 1
@@ -349,7 +355,7 @@ def fire_due_tasks(now=None, sms_sender=None, email_sender=None):
                last_activity_at=last_activity_at
                WHERE stage IN ('attempted','voicemail')
                  AND last_activity_at<?
-                 AND (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=people.id) >= 5""",
-            (stale_cut,)).rowcount
+                 AND (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=people.id) >= ?""",
+            (stale_cut, queue_policy.max_attempts())).rowcount
         fired["recycled"] = recycled
     return fired

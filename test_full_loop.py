@@ -87,7 +87,9 @@ names2 = {r["Name"] for r in rows2}
 with db.connect() as c:
     reached = [row["full_name"] for row in c.execute("SELECT full_name FROM people WHERE stage='contacted'")]
 check("reached lead no longer in next call queue", all(nm not in names2 for nm in reached))
-check("voicemail leads return for retry", any(r["Queue_Type"] == "retry" for r in rows2))
+check("voicemail leads do not retry same day", all(r["Queue_Type"] != "retry" for r in rows2))
+rows3 = bq.build_queue(owner="chris", agenda_date=(datetime.now() + timedelta(days=1)).date().isoformat())
+check("voicemail leads return for retry on a later day", any(r["Queue_Type"] == "retry" for r in rows3))
 
 passed = sum(1 for _, ok in results if ok)
 print(f"\n{'='*52}\n{passed}/{len(results)} PASSED" + (" — FULL LOOP WORKS" if passed == len(results) else " *** FAILURES ***"))

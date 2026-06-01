@@ -12,6 +12,8 @@ DOMAIN="${CC_DOMAIN:-}"                 # e.g. cc.ncwealthprotection.me (optiona
 PORT="${COMMAND_CENTER_PORT:-5055}"
 CC_GEO_FILTER_ENABLED="${CC_GEO_FILTER_ENABLED:-true}"
 CC_TARGET_BIRTH_YEARS="${CC_TARGET_BIRTH_YEARS:-1962}"
+CC_MAX_CALL_ATTEMPTS="${CC_MAX_CALL_ATTEMPTS:-4}"
+CC_RETRYABLE_DISPOSITIONS="${CC_RETRYABLE_DISPOSITIONS:-no_answer,busy,voicemail_dropped,answering_machine,machine_skipped,false_bridge}"
 
 read -rp "Dashboard username [chris]: " CC_USERNAME; CC_USERNAME="${CC_USERNAME:-chris}"
 read -rsp "Dashboard password (required): " CC_PASSWORD; echo
@@ -44,6 +46,8 @@ Environment=CC_DATA_DIR=$DATA_DIR
 Environment=COMMAND_CENTER_PORT=$PORT
 Environment=CC_GEO_FILTER_ENABLED=$CC_GEO_FILTER_ENABLED
 Environment=CC_TARGET_BIRTH_YEARS=$CC_TARGET_BIRTH_YEARS
+Environment=CC_MAX_CALL_ATTEMPTS=$CC_MAX_CALL_ATTEMPTS
+Environment=CC_RETRYABLE_DISPOSITIONS=$CC_RETRYABLE_DISPOSITIONS
 ExecStart=$APP_DIR/venv/bin/gunicorn -w 1 -b 127.0.0.1:$PORT app:app
 Restart=always
 [Install]

@@ -11,6 +11,7 @@ from datetime import datetime
 import pandas as pd
 
 import db
+import queue_policy
 
 # Each dialer's live results file + which agent it belongs to.
 # Add a line here when a new agent comes online — that's the whole integration.
@@ -124,11 +125,18 @@ def _apply_disposition_side_effects(conn, pid, row):
     category = db.disposition_category(disposition)
     now = _clean(row.get("disposition_time")) or datetime.now().isoformat(timespec="seconds")
 
-    if phone and category == "bad_number":
+    if phone and (category == "bad_number" or disposition in queue_policy.TERMINAL_PHONE_DISPOSITIONS):
         conn.execute("UPDATE phone_numbers SET status='bad' WHERE e164=?", (phone,))
         if disposition == "spam_blocked":
             conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
                          (phone, "spam_blocked", now))
+
+    if phone and queue_policy.attempt_count(conn, pid, phone) >= queue_policy.max_attempts():
+        conn.execute("UPDATE phone_numbers SET status='bad' WHERE e164=?", (phone,))
+        conn.execute("INSERT INTO person_notes(person_id, body, author, created_at) "
+                     "SELECT ?, ?, 'automation', ? WHERE NOT EXISTS ("
+                     "SELECT 1 FROM person_notes WHERE person_id=? AND body LIKE 'Phone reached max call attempts:%')",
+                     (pid, f"Phone reached max call attempts: {phone}", now, pid))
 
     if category == "dnc":
         conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('person',?,?,?)",

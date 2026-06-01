@@ -29,6 +29,7 @@ from flask import Blueprint, jsonify, request, Response
 
 import db
 import geo_policy
+import queue_policy
 
 agent_api = Blueprint("agent_api", __name__)
 
@@ -354,13 +355,27 @@ def call_queue():
                       AND NOT EXISTS (SELECT 1 FROM suppressions ss WHERE ss.scope='phone' AND ss.value=x.e164)
                     LIMIT 1) phone,
                    (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=p.id) call_count,
+                   (SELECT disposition FROM call_attempts c WHERE c.person_id=p.id
+                    ORDER BY dialed_at DESC LIMIT 1) last_disposition,
                    (SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id
-                    ORDER BY dialed_at DESC LIMIT 1) last_outcome
+                    ORDER BY dialed_at DESC LIMIT 1) last_outcome,
+                   (SELECT dialed_at FROM call_attempts c WHERE c.person_id=p.id
+                    ORDER BY dialed_at DESC LIMIT 1) last_call_time
             FROM people p
             WHERE {' AND '.join(where)}
             ORDER BY (stage='callback') DESC, lead_score DESC, last_activity_at ASC
             LIMIT ?""", params + [fetch_limit]).fetchall()
-    leads = [dict(r) for r in rows]
+        leads = []
+        today = queue_policy.coerce_day()
+        for r in rows:
+            d = dict(r)
+            qtype = "retry" if d.get("stage") in ("attempted", "voicemail") else d.get("stage", "")
+            status = queue_policy.retry_status(conn, d["id"], d.get("phone", ""), d.get("stage", ""), qtype, today)
+            if not status["allowed"]:
+                continue
+            d["call_count"] = status["attempts"]
+            d["attempts_remaining"] = status["attempts_remaining"]
+            leads.append(d)
     if geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True):
         leads = [r for r in leads if geo_policy.city_is_allowed(r.get("city", ""))]
     leads = [r for r in leads if geo_policy.birthday_is_target(r.get("birthday", ""))]
@@ -408,6 +423,11 @@ def leads_disposition():
             VALUES (?,?,?,?,?,?,?,?)""",
             (pid, phone["e164"] if phone else "", _clean(d.get("agent")), _now(), disposition, category,
              d.get("live_talk_seconds"), f"agentapi|{pid}|{_now()}|{disposition}"))
+        logged_phone = phone["e164"] if phone else ""
+        if logged_phone and (category == "bad_number" or disposition in queue_policy.TERMINAL_PHONE_DISPOSITIONS):
+            conn.execute("UPDATE phone_numbers SET status='bad' WHERE e164=?", (logged_phone,))
+        if logged_phone and queue_policy.attempt_count(conn, pid, logged_phone) >= queue_policy.max_attempts():
+            conn.execute("UPDATE phone_numbers SET status='bad' WHERE e164=?", (logged_phone,))
         conn.execute("UPDATE people SET stage=?, last_activity_at=? WHERE id=?", (new_stage, _now(), pid))
         if _clean(d.get("note")):
             conn.execute("INSERT INTO person_notes(person_id, body, author, created_at) VALUES (?,?,?,?)",

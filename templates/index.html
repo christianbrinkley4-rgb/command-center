@@ -50,6 +50,24 @@
       </div>
       <div class="hero-mini" id="heroMinis"></div>
     </div>
+    <div class="agenda-bar">
+      <div class="agenda-main">
+        <div class="agenda-title">Call Agenda</div>
+        <div class="agenda-sub" id="agendaSummary">Loading agenda...</div>
+      </div>
+      <label class="agenda-field">
+        <span>Date</span>
+        <input type="date" id="agendaDate">
+      </label>
+      <label class="agenda-field agenda-city">
+        <span>City target</span>
+        <input type="text" id="agendaCity" list="agendaCities" placeholder="All eligible cities">
+        <datalist id="agendaCities"></datalist>
+      </label>
+      <button class="btn-pill" id="agendaApplyBtn">Apply</button>
+      <button class="q-btn" id="agendaClearBtn">Clear City</button>
+    </div>
+    <div class="agenda-chips" id="agendaCityChips"></div>
 
     <div class="queue-grid">
       <div class="queue-col">

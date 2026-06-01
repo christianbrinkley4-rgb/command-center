@@ -10,6 +10,8 @@ Config (env or defaults below):
     CC_USERNAME / CC_PASSWORD   (dashboard login)
     CC_QUEUE_OWNER  = chris | will   (whose queue)
     CC_QUEUE_OUT    = path to the dialer's contacts.xlsx
+    CC_QUEUE_DATE   = optional agenda date YYYY-MM-DD
+    CC_QUEUE_CITY   = optional city target
 """
 import os
 import sys
@@ -23,22 +25,31 @@ PW = os.getenv("CC_PASSWORD", "")
 OWNER = os.getenv("CC_QUEUE_OWNER", "chris")
 OUT = os.getenv("CC_QUEUE_OUT", r"C:\dialer\MyDialer_TODAY_READY\MyDialer\contacts.xlsx")
 LIMIT = os.getenv("CC_QUEUE_LIMIT", "1000")
+AGENDA_DATE = os.getenv("CC_QUEUE_DATE", "")
+AGENDA_CITY = os.getenv("CC_QUEUE_CITY", "")
 
 COLUMNS = ["Queue_Type", "Name", "Phone", "Address", "City", "County", "Birthday",
-           "Last_Disposition", "Last_Call_Time", "Source", "Lead_Score", "person_id"]
+           "Last_Disposition", "Last_Outcome", "Last_Call_Time", "Attempt_Count",
+           "Attempts_Remaining", "Agenda_Date", "Source", "Lead_Score", "person_id"]
 
 
 def main():
     if not PW:
         sys.exit("Set CC_PASSWORD (dashboard password) first.")
     try:
-        r = requests.get(f"{URL}/api/dialer-queue", params={"owner": OWNER, "limit": LIMIT},
+        params = {"owner": OWNER, "limit": LIMIT}
+        if AGENDA_DATE:
+            params["date"] = AGENDA_DATE
+        if AGENDA_CITY:
+            params["city"] = AGENDA_CITY
+        r = requests.get(f"{URL}/api/dialer-queue", params=params,
                          auth=(USER, PW), timeout=30)
     except Exception as exc:
         sys.exit(f"Could not reach Command Center ({URL}): {exc}")
     if r.status_code != 200:
         sys.exit(f"Command Center returned {r.status_code}: {r.text[:200]}")
     queue = r.json().get("queue", [])
+    agenda = r.json().get("agenda", {})
     if not queue:
         print("Cloud queue is empty — nothing to dial. (contacts.xlsx left unchanged.)")
         return
@@ -53,7 +64,9 @@ def main():
     for q in queue:
         by[q["Queue_Type"]] = by.get(q["Queue_Type"], 0) + 1
     print(f"Pulled {len(df)} leads from the dashboard -> {OUT}")
+    target = agenda.get("city_filter") or "all eligible cities"
     print("  call order matches the dashboard exactly. Breakdown:", by)
+    print(f"  agenda: {agenda.get('date', '')} | city target: {target}")
     print("  call #1:", queue[0]["Name"], "|", queue[0]["City"], "|", queue[0]["Phone"])
 
 
