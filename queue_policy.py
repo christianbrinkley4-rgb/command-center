@@ -111,7 +111,20 @@ def retry_status(conn, person_id, phone, stage="", qtype="", agenda_day=None):
     attempts = attempt_count(conn, person_id, phone)
     limit = max_attempts()
     latest = latest_attempt(conn, person_id, phone)
+    person_latest = latest_attempt(conn, person_id)
     remaining = max(0, limit - attempts)
+    needs_retry_check = qtype == "retry" or stage in {"attempted", "voicemail"}
+
+    if needs_retry_check and person_latest:
+        person_call_day = str(person_latest.get("dialed_at") or "")[:10]
+        if person_call_day and person_call_day >= agenda_day.isoformat():
+            return {
+                "allowed": False,
+                "reason": "same_day_lead",
+                "attempts": attempts,
+                "attempts_remaining": remaining,
+                "latest": person_latest,
+            }
 
     if attempts >= limit:
         return {
@@ -128,7 +141,7 @@ def retry_status(conn, person_id, phone, stage="", qtype="", agenda_day=None):
             "reason": "new",
             "attempts": attempts,
             "attempts_remaining": remaining,
-            "latest": latest,
+            "latest": person_latest,
         }
 
     disposition = str(latest.get("disposition") or "").strip().lower()
@@ -144,7 +157,6 @@ def retry_status(conn, person_id, phone, stage="", qtype="", agenda_day=None):
             "latest": latest,
         }
 
-    needs_retry_check = qtype == "retry" or stage in {"attempted", "voicemail"}
     if needs_retry_check:
         if disposition not in retryable_dispositions():
             return {
