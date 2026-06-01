@@ -610,6 +610,26 @@ def api_insights():
     return jsonify(learning.get_stats())
 
 
+# Approx drive-time (minutes) from Greensboro — used as the conversion tie-breaker:
+# closer prospects are likelier to keep an in-person appointment. Lower = call sooner.
+CITY_DRIVE_MIN = {
+    "greensboro": 0, "mc leansville": 8, "mcleansville": 8, "pleasant gdn": 12,
+    "pleasant garden": 12, "jamestown": 14, "sedalia": 14, "browns summit": 14,
+    "forest oaks": 14, "high point": 18, "colfax": 18, "summerfield": 18, "whitsett": 18,
+    "julian": 20, "gibsonville": 20, "oak ridge": 20, "climax": 22, "archdale": 22,
+    "stokesdale": 24, "trinity": 24, "elon": 24, "thomasville": 26, "kernersville": 26,
+    "burlington": 28, "randleman": 28, "sophia": 30, "graham": 30, "reidsville": 30,
+    "staley": 32, "haw river": 32, "asheboro": 34, "liberty": 34, "mebane": 34,
+}
+DEFAULT_DRIVE_MIN = 45  # unknown/farther cities go after known-close ones
+
+
+def _drive_minutes(city):
+    import re as _re
+    key = _re.sub(r"[^a-z ]", "", str(city or "").lower()).strip()
+    return CITY_DRIVE_MIN.get(key, DEFAULT_DRIVE_MIN)
+
+
 @app.route("/api/dialer-queue")
 def api_dialer_queue():
     """The single source of truth for call order. The dialer pulls this exact ranked
@@ -643,7 +663,7 @@ def api_dialer_queue():
                 f"(SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id ORDER BY dialed_at DESC LIMIT 1) last_outcome "
                 f"FROM people p WHERE p.stage<>'dnc' AND p.stage<>'closed'{own}")
 
-        def add(r, qtype):
+        def add(r, qtype, bucket):
             pid = r["id"]
             if pid in seen or pid in held:
                 return
@@ -651,30 +671,38 @@ def api_dialer_queue():
             if not ph or suppressed(ph):
                 return
             seen.add(pid)
-            rows.append({"Queue_Type": qtype, "Name": r["full_name"] or "", "Phone": ph,
-                         "Address": r["address"] or "", "City": r["city"] or "", "County": r["county"] or "",
-                         "Birthday": r["birthday"] or "", "Last_Disposition": r["last_outcome"] or "",
-                         "Last_Call_Time": r["last_activity_at"] or "", "Source": r["source"] or "",
-                         "Lead_Score": r["lead_score"], "person_id": pid})
+            bucket.append({"Queue_Type": qtype, "Name": r["full_name"] or "", "Phone": ph,
+                           "Address": r["address"] or "", "City": r["city"] or "", "County": r["county"] or "",
+                           "Birthday": r["birthday"] or "", "Last_Disposition": r["last_outcome"] or "",
+                           "Last_Call_Time": r["last_activity_at"] or "", "Source": r["source"] or "",
+                           "Lead_Score": r["lead_score"], "person_id": pid,
+                           "_drive": _drive_minutes(r["city"])})
 
-        # 1) scheduled calls due
+        # Each tier keeps its priority, but WITHIN a tier we rank by score desc then
+        # CLOSEST CITY first (shorter drive = likelier to keep an appointment).
+        def sort_tier(b):
+            b.sort(key=lambda x: (-(x["Lead_Score"] or 0), x["_drive"], x["Name"]))
+            return b
+
+        t_sched, t_call, t_hot, t_new, t_retry = [], [], [], [], []
         if due:
-            q = base + " AND p.id IN ({}) ORDER BY p.lead_score DESC".format(",".join("?" * len(due)))
+            q = base + " AND p.id IN ({})".format(",".join("?" * len(due)))
             for r in conn.execute(q, own_p + list(due)):
-                add(r, "scheduled_call")
-        # 2) callbacks
-        for r in conn.execute(base + " AND p.stage='callback' ORDER BY p.last_activity_at ASC", own_p):
-            add(r, "callback")
-        # 3) hot fresh (<24h)
-        for r in conn.execute(base + " AND p.stage='new' AND p.first_seen_at>=? ORDER BY p.lead_score DESC, p.first_seen_at DESC",
-                              own_p + [cutoff_24h]):
-            add(r, "hot_fresh")
-        # 4) other new by score
-        for r in conn.execute(base + " AND p.stage='new' ORDER BY p.lead_score DESC, p.first_seen_at ASC", own_p):
-            add(r, "never_called")
-        # 5) retry by score
-        for r in conn.execute(base + " AND p.stage IN ('attempted','voicemail') ORDER BY p.lead_score DESC, p.last_activity_at ASC", own_p):
-            add(r, "retry")
+                add(r, "scheduled_call", t_sched)
+        for r in conn.execute(base + " AND p.stage='callback'", own_p):
+            add(r, "callback", t_call)
+        for r in conn.execute(base + " AND p.stage='new' AND p.first_seen_at>=?", own_p + [cutoff_24h]):
+            add(r, "hot_fresh", t_hot)
+        for r in conn.execute(base + " AND p.stage='new'", own_p):
+            add(r, "never_called", t_new)
+        for r in conn.execute(base + " AND p.stage IN ('attempted','voicemail')", own_p):
+            add(r, "retry", t_retry)
+
+        for tier in (t_sched, t_call, t_hot, t_new, t_retry):
+            rows.extend(sort_tier(tier))
+        # strip internal sort key from the response
+        for x in rows:
+            x.pop("_drive", None)
     return jsonify({"count": len(rows), "queue": rows[:limit]})
 
 
