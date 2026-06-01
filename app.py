@@ -186,22 +186,6 @@ def api_action_queue():
             d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["person_id"])
             appointments.append(d)
 
-        # 3) Best leads to call next — not yet reached, not DNC, highest score first.
-        call_next = []
-        for r in conn.execute(
-            f"""SELECT p.id, p.full_name, p.city, p.county, p.birthday, p.source, p.owner,
-                      p.lead_score, p.stage, p.last_activity_at,
-                      (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=p.id) call_count,
-                      (SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id
-                       ORDER BY dialed_at DESC LIMIT 1) last_outcome
-               FROM people p
-               WHERE p.stage IN ('new','attempted','voicemail'){own_sql}
-               ORDER BY p.lead_score DESC, p.last_activity_at ASC LIMIT 60""", own_p):
-            d = dict(r); d["age"] = _age(r["birthday"]); d["phone"] = phone_of(r["id"])
-            d["reason"] = ("Never called" if not d["call_count"]
-                           else f"{d['call_count']}x · last: " + db.CATEGORY_LABELS.get(d["last_outcome"], d["last_outcome"] or "—"))
-            call_next.append(d)
-
         hero = {
             "appointments_total": conn.execute("SELECT COUNT(*) n FROM appointments").fetchone()["n"],
             "appointments_today": conn.execute(
@@ -213,6 +197,18 @@ def api_action_queue():
                 "SELECT COUNT(*) n FROM call_attempts WHERE substr(dialed_at,1,10)=?", (today,)).fetchone()["n"],
             "callbacks_due": len(callbacks),
         }
+    # 'Call Next' uses the SAME ranking the dialer pulls, so dashboard order == dialer order.
+    ranked = _build_ranked_queue(owner, limit=60)
+    call_next = []
+    for r in ranked:
+        call_next.append({
+            "id": r["person_id"], "full_name": r["Name"], "city": r["City"], "county": r["County"],
+            "phone": r["Phone"], "source": r["Source"], "lead_score": r["Lead_Score"],
+            "stage": r["Queue_Type"], "age": _age(r["Birthday"]),
+            "reason": {"scheduled_call": "Scheduled callback due", "callback": "Callback requested",
+                       "hot_fresh": "🔥 Fresh lead", "never_called": "Never called",
+                       "retry": "Retry"}.get(r["Queue_Type"], r["Queue_Type"]),
+        })
     return jsonify({"hero": hero, "callbacks": callbacks, "appointments": appointments,
                     "call_next": call_next, "synced_at": datetime.now().strftime("%I:%M:%S %p")})
 
@@ -630,14 +626,12 @@ def _drive_minutes(city):
     return CITY_DRIVE_MIN.get(key, DEFAULT_DRIVE_MIN)
 
 
-@app.route("/api/dialer-queue")
-def api_dialer_queue():
-    """The single source of truth for call order. The dialer pulls this exact ranked
-    list so the dashboard's order and the dialer's order ALWAYS match. Same priority
-    as the Today view: scheduled-calls-due > callbacks > hot fresh > new(by score) >
-    retry. Excludes DNC/suppressed/reached/future-held."""
-    owner = (request.args.get("owner") or "").strip().lower()
-    limit = min(int(request.args.get("limit", 1000)), 5000)
+def _build_ranked_queue(owner="", limit=5000):
+    """THE single ranking used everywhere — the dialer's call list AND the dashboard's
+    'Call Next' both call this, so their order is ALWAYS identical. Priority:
+    scheduled-calls-due > callbacks > hot fresh > new(by score) > retry, and within
+    each tier: score desc -> closest city -> name. Excludes DNC/suppressed/future-held."""
+    owner = (owner or "").strip().lower()
     now_iso = datetime.now().isoformat(timespec="seconds")
     cutoff_24h = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
     own = " AND p.owner=?" if owner else ""
@@ -703,7 +697,16 @@ def api_dialer_queue():
         # strip internal sort key from the response
         for x in rows:
             x.pop("_drive", None)
-    return jsonify({"count": len(rows), "queue": rows[:limit]})
+    return rows[:limit]
+
+
+@app.route("/api/dialer-queue")
+def api_dialer_queue():
+    """The dialer pulls this exact ranked list (single source of truth)."""
+    owner = (request.args.get("owner") or "").strip().lower()
+    limit = min(int(request.args.get("limit", 1000)), 5000)
+    rows = _build_ranked_queue(owner, limit)
+    return jsonify({"count": len(rows), "queue": rows})
 
 
 @app.route("/api/pipeline")
