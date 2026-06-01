@@ -127,6 +127,23 @@ CREATE TABLE IF NOT EXISTS audit_log (
     at        TEXT
 );
 
+CREATE TABLE IF NOT EXISTS deals (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id     INTEGER REFERENCES people(id),
+    agent         TEXT,
+    product       TEXT DEFAULT '',          -- medicare_advantage / med_supp / pdp / life / other
+    stage         TEXT DEFAULT 'quoted',    -- quoted / application / submitted / enrolled / lost
+    est_value     REAL DEFAULT 0,           -- estimated annual premium or face value
+    est_commission REAL DEFAULT 0,          -- estimated commission
+    lost_reason   TEXT DEFAULT '',
+    notes         TEXT DEFAULT '',
+    created_at    TEXT,
+    updated_at    TEXT,
+    closed_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_deals_person ON deals(person_id);
+CREATE INDEX IF NOT EXISTS idx_deals_stage  ON deals(stage);
+
 CREATE INDEX IF NOT EXISTS idx_calls_person   ON call_attempts(person_id);
 CREATE INDEX IF NOT EXISTS idx_calls_dialed   ON call_attempts(dialed_at);
 CREATE INDEX IF NOT EXISTS idx_calls_disp     ON call_attempts(disposition_category);

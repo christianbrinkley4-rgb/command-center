@@ -20,6 +20,7 @@
   </div>
   <nav class="tabs">
     <button class="tab active" data-view="today">Today</button>
+    <button class="tab" data-view="pipeline">Pipeline</button>
     <button class="tab" data-view="automations">Automations</button>
     <button class="tab" data-view="messages">Messages</button>
     <button class="tab" data-view="analytics">Analytics</button>
@@ -90,6 +91,29 @@
     <div class="panel">
       <div class="panel-head"><h3>Recently fired automatically</h3></div>
       <div class="auto-list" id="firedList"></div>
+    </div>
+  </section>
+
+  <!-- ============ PIPELINE / DEALS ============ -->
+  <section id="view-pipeline" class="view hidden">
+    <div class="kpi-grid" id="pipeKpis"></div>
+    <div class="panel-row">
+      <div class="panel">
+        <div class="panel-head"><h3>Funnel — lead to deal</h3></div>
+        <div class="funnel" id="pipeFunnel"></div>
+      </div>
+      <div class="panel panel-wide">
+        <div class="panel-head"><h3>Conversion by source — where the deals come from</h3></div>
+        <div class="table-wrap" style="box-shadow:none;border:none">
+          <table class="leads-table"><thead><tr>
+            <th>Source</th><th>Leads</th><th>Contacted</th><th>Appts</th><th>Appt %</th><th>Deals</th><th>Deal %</th>
+          </tr></thead><tbody id="pipeSources"></tbody></table>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Recent deals</h3></div>
+      <div class="auto-list" id="pipeDeals"></div>
     </div>
   </section>
 

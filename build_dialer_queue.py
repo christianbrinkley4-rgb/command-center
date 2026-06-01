@@ -25,7 +25,7 @@ writes the queue atomically so it's safe to run anytime.
 """
 import argparse
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -96,7 +96,15 @@ def build_queue(owner="", limit=2000, did_cap=0):
             if r["id"] not in hold_ids:
                 add(dict(r), "callback")
 
-        # 3) New leads (never called) by score
+        # 3a) HOT leads first — brand new, imported in the last 24h (speed-to-lead is the
+        #     #1 conversion predictor: fresh leads answer + convert far better).
+        cutoff = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
+        for r in conn.execute(base + " AND p.stage='new' AND p.first_seen_at>=? ORDER BY p.lead_score DESC, p.first_seen_at DESC",
+                              own_p + [cutoff]):
+            if r["id"] not in hold_ids:
+                add(dict(r), "hot_fresh")
+
+        # 3b) Other new leads (never called) by score
         for r in conn.execute(base + " AND p.stage='new' ORDER BY p.lead_score DESC, p.first_seen_at ASC", own_p):
             if r["id"] not in hold_ids:
                 add(dict(r), "never_called")

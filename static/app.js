@@ -43,11 +43,45 @@ function showView(v) {
 $$(".tab").forEach(t => t.onclick = () => {
   showView(t.dataset.view);
   if (t.dataset.view === "today") loadToday();
+  if (t.dataset.view === "pipeline") loadPipeline();
   if (t.dataset.view === "automations") loadAutomations();
   if (t.dataset.view === "messages") loadTemplates();
   if (t.dataset.view === "analytics") loadAnalytics();
   if (t.dataset.view === "leads") loadLeads();
 });
+const money = v => "$" + Math.round(v || 0).toLocaleString();
+
+/* ---------------- PIPELINE / DEALS ---------------- */
+async function loadPipeline() {
+  const qs = ownerFilter ? "?owner=" + ownerFilter : "";
+  const d = await (await fetch("/api/pipeline" + qs)).json();
+  const k = d.kpis;
+  $("#pipeKpis").innerHTML = [
+    ["k-green", money(k.commission_won), "Commission Won", money(k.revenue_won) + " premium"],
+    ["k-green", k.deals_won, "Deals Won", ""],
+    ["k-cyan", k.deals_in_flight, "Deals In Flight", money(k.commission_in_flight) + " potential"],
+    ["k-blue", k.appt_kept_rate + "%", "Appt Kept Rate", ""],
+    ["k-magenta", k.close_rate + "%", "Close Rate", "kept → deal"],
+  ].map(([c, v, l, s]) => `<div class="kpi ${c}"><div class="k-val">${v}</div><div class="k-label">${l}</div>${s ? `<div class="k-sub">${s}</div>` : ""}</div>`).join("");
+
+  const max = Math.max(d.funnel[0].count, 1);
+  $("#pipeFunnel").innerHTML = d.funnel.map(f =>
+    `<div class="f-row"><span class="f-name">${esc(f.stage)}</span><div class="f-bar" style="width:${Math.max(8, 100 * f.count / max)}%">${f.count}</div></div>`).join("");
+
+  $("#pipeSources").innerHTML = d.by_source.map(s => `<tr>
+    <td class="t-name">${esc(s.source)}</td><td>${s.leads}</td><td>${s.contacted}</td>
+    <td>${s.appts}</td><td>${s.appt_rate}%</td>
+    <td><b style="color:var(--green)">${s.deals}</b></td><td>${s.deal_rate}%</td></tr>`).join("")
+    || `<tr><td colspan="7" class="muted" style="padding:24px;text-align:center">No source data yet.</td></tr>`;
+
+  $("#pipeDeals").innerHTML = d.recent_deals.map(dl => `<div class="auto-r" onclick="openLead(${dl.person_id})">
+    <span class="auto-ic">💼</span>
+    <div class="auto-main"><div class="auto-name">${esc(dl.full_name || "Unknown")} <span class="badge b-${dl.stage === 'enrolled' ? 'appointment' : dl.stage === 'lost' ? 'dnc' : 'callback'}">${esc(dl.stage)}</span></div>
+      <div class="auto-reason">${esc(dl.product || "—")}${dl.city ? " · " + esc(dl.city) : ""} · ${esc(dl.owner || "")}</div></div>
+    <div class="auto-when">${money(dl.est_commission)} comm</div></div>`).join("")
+    || emptyState("No deals logged yet", "When you close a deal, log it from a lead and it appears here.");
+  $("#syncText").textContent = "synced " + d.synced_at;
+}
 $("#backBtn").onclick = () => showView("leads");
 $("#refreshBtn").onclick = async () => { await fetch("/api/sync", { method: "POST" }); toast("Synced with dialers"); refreshVisibleView(); };
 
@@ -398,6 +432,9 @@ async function openLead(id) {
     <div class="cc-row"><span class="l">Owner</span><span class="v" style="text-transform:capitalize">${esc(p.owner || "—")}</span></div>
     <div class="cc-actions">
       <button class="btn btn-primary" onclick="actAppt(${id})">＋ Set Appointment</button>
+      ${p.stage === 'appointment' ? `<button class="btn btn-soft" onclick="apptOutcome(${id},'kept')">✓ Appt Kept</button>
+        <button class="btn btn-soft" onclick="apptOutcome(${id},'no_show')">✗ No-Show</button>` : ''}
+      <button class="btn btn-win" onclick="logDeal(${id})">💼 Log Deal / Sale</button>
       <button class="btn btn-soft" onclick="actNote(${id})">＋ Add Note</button>
       <button class="btn btn-soft" onclick="previewMsg(${id})">✉ Preview Message</button>
       <button class="btn btn-soft" onclick="actStage(${id},'callback')">Mark Callback</button>
@@ -450,6 +487,22 @@ async function actStage(id, stage) {
   toast(stage === "dnc" ? "Marked Do Not Call" : "Marked " + stage);
   if (currentLead === id) openLead(id); else refreshVisibleView();
 }
+async function apptOutcome(id, outcome) {
+  await fetch(`/api/lead/${id}/appointment-outcome`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ outcome }) });
+  toast(outcome === "kept" ? "Appointment kept ✓" : outcome === "no_show" ? "No-show — follow-up auto-scheduled" : "Cancelled");
+  if (currentLead === id) openLead(id);
+}
+async function logDeal(id) {
+  const product = prompt("Product (e.g. Medicare Advantage, Med Supp, PDP, Life):", "Medicare Advantage");
+  if (product === null) return;
+  const stage = (prompt("Stage: quoted / application / submitted / enrolled / lost", "enrolled") || "enrolled").trim();
+  const comm = parseFloat(prompt("Estimated commission ($):", "500") || "0") || 0;
+  const val = parseFloat(prompt("Estimated annual premium / value ($):", "1200") || "0") || 0;
+  await fetch(`/api/lead/${id}/deal`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ product, stage, est_commission: comm, est_value: val, update: true }) });
+  toast(stage === "enrolled" ? "🎉 Deal won! Logged." : "Deal updated: " + stage);
+  if (currentLead === id) openLead(id);
+}
 
 /* ---------------- appointment modal ---------------- */
 let apptLeadId = null;
@@ -480,7 +533,7 @@ $("#apptSave").onclick = async () => {
 };
 
 /* ---------------- keyboard shortcuts ---------------- */
-const VIEW_KEYS = { "1": "today", "2": "automations", "3": "analytics", "4": "leads" };
+const VIEW_KEYS = { "1": "today", "2": "pipeline", "3": "automations", "4": "messages", "5": "analytics", "6": "leads" };
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") { $("#apptModal").classList.add("hidden"); return; }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
@@ -488,7 +541,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "/") { e.preventDefault(); showView("leads"); loadLeads(); setTimeout(() => $("#leadSearch").focus(), 50); return; }
   if (VIEW_KEYS[e.key]) {
     const v = VIEW_KEYS[e.key]; showView(v);
-    ({ today: loadToday, automations: loadAutomations, analytics: loadAnalytics, leads: loadLeads }[v] || (() => {}))();
+    ({ today: loadToday, pipeline: loadPipeline, automations: loadAutomations, messages: loadTemplates, analytics: loadAnalytics, leads: loadLeads }[v] || (() => {}))();
   }
   if (e.key.toLowerCase() === "r") { fetch("/api/sync", { method: "POST" }).then(refreshVisibleView); toast("Refreshed"); }
 });
@@ -496,6 +549,7 @@ document.addEventListener("keydown", e => {
 /* ---------------- boot ---------------- */
 function refreshVisibleView() {
   if (activeView === "today") loadToday();
+  else if (activeView === "pipeline") loadPipeline();
   else if (activeView === "automations") loadAutomations();
   else if (activeView === "messages") { /* don't auto-refresh while editing */ }
   else if (activeView === "analytics") loadAnalytics();

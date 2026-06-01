@@ -314,15 +314,93 @@ def api_add_appointment(pid):
         conn.execute(
             "INSERT INTO appointments(person_id, agent, scheduled_at, notes, status, created_at) VALUES (?,?,?,?, 'scheduled', ?)",
             (pid, data.get("agent", ""), data.get("scheduled_at", ""), data.get("notes", ""), now))
-        conn.execute("UPDATE people SET stage='appointment' WHERE id=?", (pid,))
+        conn.execute("UPDATE people SET stage='appointment', last_activity_at=? WHERE id=?", (now, pid))
         db.audit(conn, "person", pid, "appointment_set", data.get("scheduled_at", ""))
+        # Auto-schedule reminder texts (24h before + morning-of) when we can parse the time.
+        try:
+            import automation
+            dt = _parse_appt_dt(data.get("scheduled_at", ""))
+            if dt:
+                automation.set_appointment_reminders(conn, pid, dt, data.get("agent", ""))
+        except Exception:
+            pass
     return jsonify({"ok": True})
+
+
+def _parse_appt_dt(text):
+    """Parse the appointment datetime from the modal (uses nlp_time as a flexible parser)."""
+    try:
+        import nlp_time
+        return nlp_time.parse_when(text)
+    except Exception:
+        return None
+
+
+@app.route("/api/lead/<int:pid>/appointment-outcome", methods=["POST"])
+def api_appointment_outcome(pid):
+    """Mark the most recent appointment kept / no-show / cancelled. A no-show auto-
+    reschedules a follow-up call so the lead is never dropped."""
+    outcome = (request.json or {}).get("outcome", "").strip()
+    if outcome not in {"kept", "no_show", "cancelled"}:
+        return jsonify({"error": "bad outcome"}), 400
+    now = datetime.now().isoformat(timespec="seconds")
+    with db.connect() as conn:
+        row = conn.execute("SELECT id, agent FROM appointments WHERE person_id=? ORDER BY created_at DESC LIMIT 1",
+                           (pid,)).fetchone()
+        if row:
+            conn.execute("UPDATE appointments SET status=? WHERE id=?", (outcome, row["id"]))
+        if outcome == "no_show":
+            # don't lose them — auto-schedule a follow-up call next good window
+            try:
+                import automation
+                from datetime import timedelta as _td
+                when = automation._clamp_to_window(datetime.now() + _td(days=1), "call")
+                automation.schedule_task(conn, pid, "call", when.isoformat(timespec="seconds"),
+                                         "appointment_no_show_followup",
+                                         automation._phone_of(conn, pid), "",
+                                         row["agent"] if row else "")
+                conn.execute("UPDATE people SET stage='callback' WHERE id=?", (pid,))
+            except Exception:
+                pass
+        db.audit(conn, "person", pid, "appointment_outcome", outcome)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/lead/<int:pid>/deal", methods=["POST"])
+def api_add_deal(pid):
+    """Log a deal (the 'into deals' half of the funnel). Tracks product, stage, and value."""
+    d = request.json or {}
+    now = datetime.now().isoformat(timespec="seconds")
+    stage = (d.get("stage") or "quoted").strip()
+    closed = now if stage in ("enrolled", "lost") else ""
+    with db.connect() as conn:
+        existing = conn.execute("SELECT id FROM deals WHERE person_id=? ORDER BY created_at DESC LIMIT 1", (pid,)).fetchone()
+        if existing and d.get("update"):
+            conn.execute("""UPDATE deals SET product=?, stage=?, est_value=?, est_commission=?,
+                            lost_reason=?, notes=?, updated_at=?, closed_at=? WHERE id=?""",
+                         (d.get("product", ""), stage, float(d.get("est_value") or 0),
+                          float(d.get("est_commission") or 0), d.get("lost_reason", ""),
+                          d.get("notes", ""), now, closed, existing["id"]))
+            deal_id = existing["id"]
+        else:
+            cur = conn.execute("""INSERT INTO deals(person_id, agent, product, stage, est_value,
+                                  est_commission, lost_reason, notes, created_at, updated_at, closed_at)
+                                  VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                               (pid, d.get("agent", ""), d.get("product", ""), stage,
+                                float(d.get("est_value") or 0), float(d.get("est_commission") or 0),
+                                d.get("lost_reason", ""), d.get("notes", ""), now, now, closed))
+            deal_id = cur.lastrowid
+        # reflect on the person
+        if stage == "enrolled":
+            conn.execute("UPDATE people SET stage='closed', last_activity_at=? WHERE id=?", (now, pid))
+        db.audit(conn, "person", pid, "deal_" + stage, d.get("product", ""))
+    return jsonify({"ok": True, "deal_id": deal_id})
 
 
 @app.route("/api/lead/<int:pid>/stage", methods=["POST"])
 def api_set_stage(pid):
     stage = (request.json or {}).get("stage", "").strip()
-    if stage not in {"new", "attempted", "voicemail", "contacted", "callback", "appointment", "dnc"}:
+    if stage not in {"new", "attempted", "voicemail", "contacted", "callback", "appointment", "closed", "dnc"}:
         return jsonify({"error": "bad stage"}), 400
     with db.connect() as conn:
         conn.execute("UPDATE people SET stage=? WHERE id=?", (stage, pid))
@@ -530,6 +608,75 @@ def api_automations():
 def api_insights():
     import learning
     return jsonify(learning.get_stats())
+
+
+@app.route("/api/pipeline")
+def api_pipeline():
+    """The money view: deals in flight, revenue won, close rate, and the full
+    lead->deal funnel with conversion rates per source (where revenue comes from)."""
+    owner = (request.args.get("owner") or "").strip().lower()
+    own = " AND owner=?" if owner else ""
+    own_p = [owner] if owner else []
+    with db.connect() as conn:
+        def n(sql, p=()):
+            return conn.execute(sql, p).fetchone()["n"]
+
+        # deal stage counts + value
+        deal_stages = {r["stage"]: {"count": r["c"], "value": r["v"] or 0, "comm": r["cm"] or 0}
+                       for r in conn.execute(
+            f"""SELECT stage, COUNT(*) c, SUM(est_value) v, SUM(est_commission) cm
+                FROM deals d {('WHERE ' + own[5:]) if owner else ''} GROUP BY stage""", own_p)}
+
+        won = deal_stages.get("enrolled", {"count": 0, "value": 0, "comm": 0})
+        in_flight = sum(v["count"] for k, v in deal_stages.items() if k not in ("enrolled", "lost"))
+        in_flight_comm = sum(v["comm"] for k, v in deal_stages.items() if k not in ("enrolled", "lost"))
+
+        # the funnel
+        leads = n(f"SELECT COUNT(*) n FROM people WHERE 1=1{own}", own_p)
+        contacted = n(f"SELECT COUNT(*) n FROM people WHERE stage IN ('contacted','callback','appointment','closed'){own}", own_p)
+        appts = n(f"SELECT COUNT(DISTINCT person_id) n FROM appointments a JOIN people p ON p.id=a.person_id WHERE 1=1{(' AND p.owner=?' if owner else '')}", own_p)
+        kept = n(f"SELECT COUNT(*) n FROM appointments a JOIN people p ON p.id=a.person_id WHERE a.status='kept'{(' AND p.owner=?' if owner else '')}", own_p)
+        deals_won = won["count"]
+
+        funnel = [
+            {"stage": "Leads", "count": leads},
+            {"stage": "Contacted", "count": contacted},
+            {"stage": "Appointments", "count": appts},
+            {"stage": "Kept", "count": kept},
+            {"stage": "Deals Won", "count": deals_won},
+        ]
+
+        # conversion by source: lead -> appointment -> deal
+        by_source = []
+        for r in conn.execute(f"""
+            SELECT p.source,
+                   COUNT(*) leads,
+                   SUM(CASE WHEN p.stage IN ('contacted','callback','appointment','closed') THEN 1 ELSE 0 END) contacted,
+                   (SELECT COUNT(DISTINCT a.person_id) FROM appointments a JOIN people pp ON pp.id=a.person_id WHERE pp.source=p.source) appts,
+                   (SELECT COUNT(*) FROM deals d JOIN people pp ON pp.id=d.person_id WHERE pp.source=p.source AND d.stage='enrolled') deals
+            FROM people p WHERE p.source<>''{own} GROUP BY p.source ORDER BY leads DESC LIMIT 12""", own_p):
+            d = dict(r)
+            d["appt_rate"] = round(100.0 * d["appts"] / d["leads"], 1) if d["leads"] else 0
+            d["deal_rate"] = round(100.0 * d["deals"] / d["leads"], 2) if d["leads"] else 0
+            by_source.append(d)
+
+        recent_deals = [dict(r) for r in conn.execute(f"""
+            SELECT d.id, d.product, d.stage, d.est_value, d.est_commission, d.updated_at,
+                   p.id person_id, p.full_name, p.city, p.owner
+            FROM deals d JOIN people p ON p.id=d.person_id
+            WHERE 1=1{(' AND p.owner=?' if owner else '')} ORDER BY d.updated_at DESC LIMIT 20""", own_p)]
+
+        appt_kept_rate = round(100.0 * kept / appts, 1) if appts else 0
+        close_rate = round(100.0 * deals_won / kept, 1) if kept else 0
+    return jsonify({
+        "kpis": {
+            "deals_won": won["count"], "revenue_won": won["value"], "commission_won": won["comm"],
+            "deals_in_flight": in_flight, "commission_in_flight": in_flight_comm,
+            "appt_kept_rate": appt_kept_rate, "close_rate": close_rate,
+        },
+        "deal_stages": deal_stages, "funnel": funnel, "by_source": by_source,
+        "recent_deals": recent_deals, "synced_at": datetime.now().strftime("%I:%M:%S %p"),
+    })
 
 
 @app.route("/api/message-preview")

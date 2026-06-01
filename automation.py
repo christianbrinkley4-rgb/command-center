@@ -339,4 +339,17 @@ def fire_due_tasks(now=None, sms_sender=None, email_sender=None):
                              ("pending" if status == "failed" else "sent", _iso(now), t["id"]))
                 fired[kind] += 1
                 _alog(conn, pid, f"{kind}_fired", f"{t['reason']} ({status})")
+
+        # Long-term nurture recycle: leads worked hard with no contact for 30+ days drop
+        # to a quarterly re-touch instead of being dialed forever (no lead ever dropped,
+        # but we stop wasting dials). They re-enter as 'new' after the rest period.
+        stale_cut = _iso(now - timedelta(days=30))
+        recycled = conn.execute(
+            """UPDATE people SET stage='new', lead_score=40,
+               last_activity_at=last_activity_at
+               WHERE stage IN ('attempted','voicemail')
+                 AND last_activity_at<?
+                 AND (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=people.id) >= 5""",
+            (stale_cut,)).rowcount
+        fired["recycled"] = recycled
     return fired

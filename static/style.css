@@ -315,3 +315,8 @@ main{padding:24px 26px 60px;max-width:1480px;margin:0 auto}
 .tpl-prev-label{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted2);font-weight:600;margin-bottom:6px}
 .tpl-actions{display:flex;gap:8px;margin-top:12px;align-items:center}
 @media(max-width:1100px){#templateList{grid-template-columns:1fr}}
+
+
+/* ================= deal / win button ================= */
+.btn-win{background:linear-gradient(135deg,#16a34a,#22c55e);color:#fff;font-weight:700}
+.btn-win:hover{filter:brightness(1.08)}
