@@ -30,6 +30,7 @@ from flask import Blueprint, jsonify, request, Response
 import db
 import geo_policy
 import queue_policy
+import queue_source_policy
 
 agent_api = Blueprint("agent_api", __name__)
 
@@ -250,7 +251,7 @@ def leads_import():
     if not isinstance(leads, list) or not leads:
         return jsonify({"error": "send a non-empty 'leads' array"}), 400
 
-    imported, duplicates, suppressed, ineligible_age, person_ids = 0, 0, 0, 0, []
+    imported, duplicates, suppressed, ineligible_age, ineligible_source, person_ids = 0, 0, 0, 0, 0, []
     with db.connect() as conn:
         if source:
             conn.execute("INSERT OR IGNORE INTO lead_sources(name, first_seen_at) VALUES (?,?)", (source, _now()))
@@ -271,6 +272,9 @@ def leads_import():
                     conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
                                  (p, "oscr_dnc", _now()))
                 suppressed += 1
+                continue
+            if not queue_source_policy.dialer_queue_eligible(source, birthday):
+                ineligible_source += 1
                 continue
             if birthday and not geo_policy.birthday_is_target(birthday):
                 ineligible_age += 1
@@ -313,7 +317,8 @@ def leads_import():
                              (pid, phone, _now()))
             person_ids.append(pid)
         db.audit(conn, "import", source or "batch", "leads_imported",
-                 f"+{imported} new, {duplicates} dup, {suppressed} suppressed, {ineligible_age} ineligible_age")
+                 f"+{imported} new, {duplicates} dup, {suppressed} suppressed, "
+                 f"{ineligible_age} ineligible_age, {ineligible_source} ineligible_source")
         if source:
             conn.execute("UPDATE lead_sources SET lead_count=(SELECT COUNT(*) FROM people WHERE source=?) WHERE name=?",
                          (source, source))
@@ -331,6 +336,7 @@ def leads_import():
 
     return jsonify({"imported": imported, "duplicates": duplicates,
                     "suppressed": suppressed, "ineligible_age": ineligible_age,
+                    "ineligible_source": ineligible_source,
                     "person_ids": person_ids})
 
 
@@ -410,6 +416,8 @@ def call_queue():
     if geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True):
         leads = [r for r in leads if geo_policy.city_is_allowed(r.get("city", ""))]
     leads = [r for r in leads if geo_policy.birthday_is_target(r.get("birthday", ""))]
+    leads = [r for r in leads if queue_source_policy.dialer_queue_eligible(
+        r.get("source", ""), r.get("birthday", ""))]
     leads = leads[:limit]
     return jsonify({"count": len(leads), "leads": leads})
 

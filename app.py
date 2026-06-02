@@ -20,6 +20,7 @@ import db
 import sync
 import geo_policy
 import queue_policy
+import queue_source_policy
 from agent_api import agent_api, _ensure_columns as _agent_ensure_columns
 
 app = Flask(__name__)
@@ -75,9 +76,17 @@ def _target_lead(row):
         return False
     try:
         birthday = row["birthday"]
+        source = row["source"]
+        stage = row["stage"] if "stage" in row.keys() else ""
     except (KeyError, TypeError):
         birthday = row.get("birthday", "") if hasattr(row, "get") else ""
-    return geo_policy.birthday_is_target(birthday)
+        source = row.get("source", "") if hasattr(row, "get") else ""
+        stage = row.get("stage", "") if hasattr(row, "get") else ""
+    if str(stage or "").strip().lower() in {"closed", "dnc"}:
+        return False
+    if not geo_policy.birthday_is_target(birthday):
+        return False
+    return queue_source_policy.dialer_queue_eligible(source, birthday)
 
 
 def _pct(n, d):
@@ -269,6 +278,8 @@ def api_leads():
     if stage:
         where.append("p.stage=?")
         params.append(stage)
+    elif not include_ineligible:
+        where.append("p.stage NOT IN ('dnc','closed')")
     if owner:
         where.append("p.owner=?")
         params.append(owner)
@@ -1347,6 +1358,7 @@ def today_search():
                                    p.source, ph.e164 phone
                    FROM phone_numbers ph JOIN people p ON p.id=ph.person_id
                    WHERE REPLACE(REPLACE(REPLACE(ph.e164,'+',''),'-',''),' ','') LIKE ?
+                     AND p.stage NOT IN ('dnc','closed')
                    ORDER BY p.lead_score DESC, p.last_activity_at DESC LIMIT 15""",
                 (f"%{tail}%",),
             ).fetchall()
@@ -1356,6 +1368,7 @@ def today_search():
                 """SELECT p.id, p.full_name, p.city, p.stage, p.lead_score, p.source,
                           (SELECT e164 FROM phone_numbers x WHERE x.person_id=p.id LIMIT 1) phone
                    FROM people p WHERE lower(p.full_name) LIKE ?
+                    AND p.stage NOT IN ('dnc','closed')
                    ORDER BY p.lead_score DESC, p.last_activity_at DESC LIMIT ?""",
                 (f"%{q.lower()}%", 15 - len(results)),
             ).fetchall()
