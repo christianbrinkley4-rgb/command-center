@@ -108,7 +108,11 @@ def retry_status(conn, person_id, phone, stage="", qtype="", agenda_day=None):
     ``reason`` is intentionally short so it can be shown/debugged in the UI.
     """
     agenda_day = coerce_day(agenda_day)
-    attempts = attempt_count(conn, person_id, phone)
+    # Cap by the PERSON's total attempts across all their numbers, not just this
+    # one phone — a lead with two numbers must not get called 2x the cap.
+    phone_attempts = attempt_count(conn, person_id, phone)
+    person_attempts = attempt_count(conn, person_id) if person_id else 0
+    attempts = max(phone_attempts, person_attempts)
     limit = max_attempts()
     latest = latest_attempt(conn, person_id, phone)
     person_latest = latest_attempt(conn, person_id)
