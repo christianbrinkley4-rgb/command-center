@@ -103,16 +103,20 @@ def filter_enabled(env_name="CC_GEO_FILTER_ENABLED", default=True):
 
 
 def target_birth_years():
-    # Default: true T65 cohort (1962 for 2027 turning-65). December 1957 bulk lists
-    # are excluded via queue_source_policy (T65_Dec_* / birth year 1957).
+    # Default covers the cohorts we're actively working:
+    #   1957 -> the OSCR December birthday lists (T65_Dec_NC / T65_Dec_VA)
+    #   1962 -> the original Dialer_Existing list + true T65 for 2027
     # Override per-deployment with CC_TARGET_BIRTH_YEARS (comma-separated years).
-    raw = os.getenv("CC_TARGET_BIRTH_YEARS", "1962")
+    # NOTE: OSCR already curates who to call, so this filter mainly exists as a
+    # safety net. When the next OSCR batch has a different birth year, add it here
+    # or via the env var (or we move to trusting the lead source outright).
+    raw = os.getenv("CC_TARGET_BIRTH_YEARS", "1957,1962")
     years = set()
     for part in str(raw or "").split(","):
         part = part.strip()
         if part.isdigit() and len(part) == 4:
             years.add(int(part))
-    return years or {1962}
+    return years or {1957, 1962}
 
 
 def birth_year(birthday):

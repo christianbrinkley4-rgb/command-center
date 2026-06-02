@@ -32,7 +32,6 @@ import pandas as pd
 import db
 import geo_policy
 import queue_policy
-import queue_source_policy
 
 OUT_COLUMNS = ["Queue_Type", "Name", "Phone", "Address", "City", "County", "Birthday",
                "Last_Disposition", "Last_Outcome", "Last_Call_Time", "Attempt_Count",
@@ -75,9 +74,6 @@ def build_queue(owner="", limit=2000, did_cap=0, agenda_date=None, city_filter="
             if _is_suppressed_person(conn, pid):
                 return
             if not geo_policy.birthday_is_target(person["birthday"]):
-                return
-            if not queue_source_policy.dialer_queue_eligible(
-                    person.get("source") or "", person.get("birthday") or ""):
                 return
             if geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True) and not geo_policy.city_is_allowed(person["city"]):
                 return

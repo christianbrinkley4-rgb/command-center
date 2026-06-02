@@ -291,7 +291,7 @@ def _pending_phones(conn, limit: int, min_score: int = DEFAULT_MIN_SCORE,
         where.append("NOT EXISTS (SELECT 1 FROM call_attempts ca WHERE ca.phone=ph.e164)")
 
     sql = (
-        "SELECT DISTINCT ph.e164, p.city, p.birthday, p.source FROM phone_numbers ph "
+        "SELECT DISTINCT ph.e164, p.city, p.birthday FROM phone_numbers ph "
         "JOIN people p ON p.id=ph.person_id "
         f"WHERE {' AND '.join(where)} "
         "ORDER BY p.lead_score DESC, ph.id ASC LIMIT ?"
@@ -318,13 +318,6 @@ def _pending_phones(conn, limit: int, min_score: int = DEFAULT_MIN_SCORE,
             continue
         if geo_policy is not None and not geo_policy.birthday_is_target(row["birthday"]):
             continue
-        try:
-            import queue_source_policy
-            if not queue_source_policy.dialer_queue_eligible(
-                    row["source"] if "source" in row.keys() else "", row["birthday"]):
-                continue
-        except Exception:
-            pass
         filtered.append(row["e164"])
         if len(filtered) >= int(limit):
             break
