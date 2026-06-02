@@ -124,6 +124,9 @@ main{padding:24px 26px 60px;max-width:1480px;margin:0 auto}
 .chip{background:var(--card);border:1px solid var(--border);color:var(--muted);padding:7px 13px;border-radius:999px;cursor:pointer;font-size:12px;font-weight:600;transition:.15s}
 .chip:hover{color:var(--txt);border-color:var(--border2)}
 .chip.active{color:#04121a;background:var(--cyan);border-color:var(--cyan)}
+.chip-noted{margin-left:6px}
+.chip-noted.active{color:#04121a;background:#f7d774;border-color:#f7d774}
+.note-tag{display:inline-block;font-size:11px;font-weight:600;color:#f7d774;background:rgba(247,215,116,.12);border:1px solid rgba(247,215,116,.25);border-radius:6px;padding:0 5px;margin-left:6px;vertical-align:middle}
 .spacer{flex:1}
 .table-wrap{background:var(--card);border:1px solid var(--border);border-radius:15px;overflow:hidden;box-shadow:var(--shadow)}
 .leads-table{width:100%;border-collapse:collapse}

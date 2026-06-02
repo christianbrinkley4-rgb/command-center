@@ -251,6 +251,14 @@ def api_action_queue():
 
 # ----------------------------- API: leads -----------------------------
 
+# Note authors written by the system, not by a human. "People I left notes for"
+# means a note from anyone NOT in this set (the dashboard 'agent', the admin
+# menu, an agent name, etc.).
+SYSTEM_NOTE_AUTHORS = ("ai_score", "post_call_ai", "automation", "oscr-agent",
+                       "oscr-ingestion", "call-agent", "system", "lead_scoring",
+                       "number_lookup")
+
+
 @app.route("/api/leads")
 def api_leads():
     q = (request.args.get("q") or "").strip()
@@ -261,7 +269,12 @@ def api_leads():
     order = sort_cols.get(sort, "last_activity_at")
 
     owner = (request.args.get("owner") or "").strip().lower()
+    noted = (request.args.get("noted") or "").strip().lower() in {"1", "true", "yes"}
     include_ineligible = (request.args.get("include_ineligible") or "").strip().lower() in {"1", "true", "yes"}
+
+    author_ph = ",".join("?" * len(SYSTEM_NOTE_AUTHORS))
+    human_note_filter = f"author NOT IN ({author_ph})"
+
     where, params = [], []
     if q:
         where.append("(p.full_name LIKE ? OR ph.e164 LIKE ? OR p.city LIKE ?)")
@@ -272,15 +285,23 @@ def api_leads():
     if owner:
         where.append("p.owner=?")
         params.append(owner)
+    if noted:
+        where.append(
+            f"EXISTS (SELECT 1 FROM person_notes n WHERE n.person_id=p.id AND n.{human_note_filter})")
+        params += list(SYSTEM_NOTE_AUTHORS)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     direction = "ASC" if order == "full_name" or order == "city" else "DESC"
 
     fetch_limit = 500 if include_ineligible else 5000
+    # The human_note_count subquery in the SELECT binds its params BEFORE the
+    # WHERE clause, so its authors go first in the param list.
+    select_params = list(SYSTEM_NOTE_AUTHORS)
     with db.connect() as conn:
         rows = conn.execute(f"""
             SELECT p.id, p.full_name, p.city, p.county, p.source, p.stage, p.lead_score,
                    p.owner, p.last_activity_at, p.birthday,
                    (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=p.id) call_count,
+                   (SELECT COUNT(*) FROM person_notes n WHERE n.person_id=p.id AND n.{human_note_filter}) human_note_count,
                    (SELECT e164 FROM phone_numbers x WHERE x.person_id=p.id LIMIT 1) phone
             FROM people p
             LEFT JOIN phone_numbers ph ON ph.person_id=p.id
@@ -288,7 +309,7 @@ def api_leads():
             GROUP BY p.id
             ORDER BY {order} {direction}
             LIMIT ?
-        """, params + [fetch_limit]).fetchall()
+        """, select_params + params + [fetch_limit]).fetchall()
     out = []
     for r in rows:
         if not include_ineligible and not _target_lead(r):

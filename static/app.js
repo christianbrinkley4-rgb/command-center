@@ -1,7 +1,7 @@
 /* Command Center dashboard */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-let charts = {}, leadState = { q: "", stage: "", sort: "last_activity_at" }, currentLead = null, activeView = "today";
+let charts = {}, leadState = { q: "", stage: "", sort: "last_activity_at", noted: false }, currentLead = null, activeView = "today";
 let ownerFilter = "";  // "", "chris", or "will"
 const localDateISO = () => {
   const d = new Date();
@@ -418,11 +418,17 @@ function badge(cat, label) {
 /* ---------------- lead book ---------------- */
 const STAGES = ["", "new", "attempted", "voicemail", "contacted", "callback", "appointment", "dnc"];
 $("#stageChips").innerHTML = STAGES.map(s =>
-  `<div class="chip ${s === "" ? "active" : ""}" data-stage="${s}">${s === "" ? "All" : s}</div>`).join("");
-$$("#stageChips .chip").forEach(c => c.onclick = () => {
-  $$("#stageChips .chip").forEach(x => x.classList.remove("active")); c.classList.add("active");
+  `<div class="chip ${s === "" ? "active" : ""}" data-stage="${s}">${s === "" ? "All" : s}</div>`).join("")
+  + `<div class="chip chip-noted" id="notedChip" title="Show only leads I left a note on">📝 Noted</div>`;
+$$("#stageChips .chip[data-stage]").forEach(c => c.onclick = () => {
+  $$("#stageChips .chip[data-stage]").forEach(x => x.classList.remove("active")); c.classList.add("active");
   leadState.stage = c.dataset.stage; loadLeads();
 });
+$("#notedChip").onclick = () => {
+  leadState.noted = !leadState.noted;
+  $("#notedChip").classList.toggle("active", leadState.noted);
+  loadLeads();
+};
 let searchTimer;
 $("#leadSearch").oninput = e => { clearTimeout(searchTimer); leadState.q = e.target.value; searchTimer = setTimeout(loadLeads, 220); };
 $$(".leads-table th[data-sort]").forEach(th => th.onclick = () => { leadState.sort = th.dataset.sort; loadLeads(); });
@@ -454,13 +460,17 @@ $("#importFile").onchange = async e => {
 async function loadLeads() {
   const p = new URLSearchParams({ q: leadState.q, stage: leadState.stage, sort: leadState.sort });
   if (ownerFilter) p.set("owner", ownerFilter);
+  if (leadState.noted) p.set("noted", "1");
   const d = await (await fetch("/api/leads?" + p)).json();
-  $("#leadCount").textContent = d.count + " leads";
+  $("#leadCount").textContent = d.count + " leads" + (leadState.noted ? " with my notes" : "");
   $("#leadsBody").innerHTML = d.leads.map(l => {
     (window._lastLeads = window._lastLeads || {})[l.id] = l.full_name || ("Lead #" + l.id);
     const sc = l.lead_score >= 80 ? "#34d399" : l.lead_score >= 50 ? "#22d3ee" : "#64748b";
+    const noteTag = l.human_note_count > 0
+      ? ` <span class="note-tag" title="${l.human_note_count} note${l.human_note_count > 1 ? "s" : ""} you left">📝${l.human_note_count > 1 ? l.human_note_count : ""}</span>`
+      : "";
     return `<tr onclick="openLead(${l.id})">
-      <td class="t-name">${esc(l.full_name || "Unknown")}</td>
+      <td class="t-name">${esc(l.full_name || "Unknown")}${noteTag}</td>
       <td>${l.age ?? "—"}</td><td>${esc(l.city || "")}</td>
       <td>${esc(l.phone || "")}</td><td>${esc(l.source || "")}</td>
       <td>${l.call_count}</td>
