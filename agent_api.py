@@ -298,6 +298,18 @@ def leads_import():
         if source:
             conn.execute("UPDATE lead_sources SET lead_count=(SELECT COUNT(*) FROM people WHERE source=?) WHERE name=?",
                          (source, source))
+    # Fire-and-forget AI scoring for newly imported leads. Falls through silently
+    # if the scoring module / provider is unavailable — the import still succeeds.
+    fresh_ids = [pid for pid in person_ids if pid]
+    if fresh_ids:
+        try:
+            import lead_scoring
+            from threading import Thread
+            Thread(target=lead_scoring.score_batch, args=(fresh_ids,),
+                   kwargs={"force": False}, daemon=True).start()
+        except Exception:
+            pass
+
     return jsonify({"imported": imported, "duplicates": duplicates,
                     "suppressed": suppressed, "ineligible_age": ineligible_age,
                     "person_ids": person_ids})
@@ -1034,6 +1046,70 @@ def admin_appointment_undo():
         "new_stage": new_stage,
         "person": after,
     })
+
+
+@agent_api.route("/agent/admin/number-lookup", methods=["POST"])
+def admin_number_lookup():
+    """Bulk-classify pending phones via Telnyx Number Lookup.
+
+    Body (all optional, defaults are cost-conservative):
+      {
+        "limit": 100,
+        "max_spend_usd": 5,
+        "sleep_between_seconds": 0.05,
+        "min_score": 70,                 # only score-worthy leads
+        "source_patterns": ["T65_"],     # only T65 lists by default
+        "owner": "chris",                # filter by agent owner
+        "dialable_stages": ["new","attempted","voicemail","callback"]
+      }
+
+    The runner refuses to start if today's cumulative spend already exceeds
+    the cap; safe to call repeatedly. Returns a summary including the
+    filters used, deactivated / classified counts, and remaining budget.
+    """
+    import number_lookup
+    d = request.get_json(silent=True) or {}
+    source_patterns = d.get("source_patterns")
+    if source_patterns is not None and not isinstance(source_patterns, list):
+        return jsonify({"error": "source_patterns must be a list of prefixes"}), 400
+    dialable = d.get("dialable_stages")
+    if dialable is not None and not isinstance(dialable, list):
+        return jsonify({"error": "dialable_stages must be a list of stages"}), 400
+    summary = number_lookup.lookup_pending(
+        limit=d.get("limit"),
+        max_spend_usd=d.get("max_spend_usd"),
+        sleep_between_seconds=float(d.get("sleep_between_seconds") or 0.05),
+        min_score=d.get("min_score"),
+        source_patterns=source_patterns,
+        owner=(d.get("owner") or "").strip(),
+        dialable_stages=tuple(dialable) if dialable else None,
+    )
+    return jsonify({"ok": True, **summary})
+
+
+@agent_api.route("/agent/admin/score", methods=["POST"])
+def admin_score_leads():
+    """Run lead scoring on demand. Body:
+       {person_ids: [..]} -> score those specific leads (force=True by default)
+       {pending: true, limit: 100} -> score any leads that have never been
+                                      AI-scored or whose score is stale
+       {force: true} -> rescore even if recently scored
+       {use_ai: false} -> heuristic only
+    """
+    import lead_scoring
+    d = request.get_json(silent=True) or {}
+    force = bool(d.get("force", False))
+    use_ai = d.get("use_ai")
+    if d.get("pending"):
+        result = lead_scoring.score_pending(
+            limit=int(d.get("limit") or 100), force=force, use_ai=use_ai,
+        )
+    else:
+        ids = d.get("person_ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"error": "send {pending: true} or {person_ids: [..]}"}), 400
+        result = lead_scoring.score_batch([int(x) for x in ids], force=True, use_ai=use_ai)
+    return jsonify({"ok": True, **result})
 
 
 @agent_api.route("/agent/admin/lead/<int:pid>/dnc", methods=["POST"])
