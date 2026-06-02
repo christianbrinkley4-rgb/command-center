@@ -180,11 +180,13 @@ function qRow(c, kind) {
   const maxAttempts = (Number(c.attempt_count || 0) + Number(c.attempts_remaining || 0)) || 4;
   const attempt = c.attempt_count !== undefined ? `prior calls ${c.attempt_count}/${maxAttempts}` : "";
   const last = c.last_disposition ? `last ${c.last_disposition.replace(/_/g, " ")} ${fmtClock(c.last_call_time)}` : "";
-  const meta = [where, c.source ? "source " + c.source : "", c.reason || "", attempt, last, c.age ? "Age " + c.age : ""].filter(Boolean).join(" | ");
+  // Source is now a visible chip next to the score; keep it out of the meta line.
+  const meta = [where, c.reason || "", attempt, last, c.age ? "Age " + c.age : ""].filter(Boolean).join(" | ");
+  const sourceChip = c.source ? `<span class="q-source" title="Lead source">${esc(c.source)}</span>` : "";
   return `<div class="q-row" onclick="openLead(${c.id})">
     <div class="q-av">${esc(initials(c.full_name))}</div>
     <div class="q-main">
-      <div class="q-name">${esc(c.full_name || "Unknown")} <span class="q-score">${c.lead_score}</span></div>
+      <div class="q-name">${esc(c.full_name || "Unknown")} <span class="q-score">${c.lead_score}</span> ${sourceChip}</div>
       <div class="q-meta">${esc(meta)}</div>
     </div>
     <div class="q-right">${telLink(c.phone)}
