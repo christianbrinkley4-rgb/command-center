@@ -55,14 +55,18 @@ def _next_phone():
     return f"+13367778{_PHONE_COUNTER[0]:03d}"
 
 
-def seed_person_with_phone(name="Test Lookup", city="Greensboro", birthday="1962-03-04"):
+def seed_person_with_phone(name="Test Lookup", city="Greensboro", birthday="1962-03-04",
+                           lead_score=85, source="T65_Dec_NC"):
+    """Score defaults above the new filter floor (70) so the existing tests don't
+    accidentally exercise the score gate. The dedicated filter section below
+    seeds explicit mixes of scores."""
     phone = _next_phone()
     with db.connect() as conn:
         cur = conn.execute(
             """INSERT INTO people(person_key, full_name, city, birthday, owner, stage, lead_score,
                source, first_seen_at, last_activity_at)
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (f"k|{name}|{phone}", name, city, birthday, "chris", "new", 50, "T65_Dec_NC", now(), now()))
+            (f"k|{name}|{phone}", name, city, birthday, "chris", "new", lead_score, source, now(), now()))
         pid = cur.lastrowid
         conn.execute("INSERT INTO phone_numbers(person_id, e164, created_at) VALUES (?,?,?)",
                      (pid, phone, now()))
@@ -200,6 +204,91 @@ check("flag ON: deactivated removed", pid4 not in pids_on)
 # Restore
 number_lookup.lookup_one = _orig_one
 os.environ.pop("CC_LOOKUP_FILTER_ENABLED", None)
+
+print("\n=== Filters target the right leads (save money) ===")
+
+# Reset so we can seed cleanly. FK pragma is on for this DB, so drop child
+# rows first OR just disable the constraint for this maintenance section.
+with db.connect() as conn:
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("DELETE FROM scheduled_tasks")
+    conn.execute("DELETE FROM call_attempts")
+    conn.execute("DELETE FROM suppressions")
+    conn.execute("DELETE FROM person_notes")
+    conn.execute("DELETE FROM phone_numbers")
+    conn.execute("DELETE FROM people")
+    conn.execute("DELETE FROM oscr_ingestion_state WHERE key LIKE 'lookup_spend_%'")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+def seed_for_filter(name, score, source, stage, suppress=False):
+    phone = _next_phone()
+    with db.connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO people(person_key, full_name, city, birthday, owner, stage,
+               lead_score, source, first_seen_at, last_activity_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (f"k|{name}|{phone}", name, "Greensboro", "1962-03-04", "chris", stage,
+             score, source, now(), now()))
+        pid = cur.lastrowid
+        conn.execute("INSERT INTO phone_numbers(person_id, e164, created_at) VALUES (?,?,?)",
+                     (pid, phone, now()))
+        if suppress:
+            conn.execute("INSERT INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?, 'manual', ?)",
+                         (phone, now()))
+    return pid, phone
+
+p_t65_high, ph_t65_high = seed_for_filter("T65 High", 85, "T65_Dec_NC", "new")
+p_t65_low, ph_t65_low   = seed_for_filter("T65 Low",  45, "T65_Dec_NC", "new")
+p_oscr_hi, ph_oscr_hi   = seed_for_filter("Oscar Hi", 90, "OSCR",       "new")
+p_dialer,  ph_dialer    = seed_for_filter("Dialer Old", 88, "Dialer_Existing", "new")
+p_t65_dnc, ph_t65_dnc   = seed_for_filter("T65 DNC", 90, "T65_Dec_NC", "dnc")
+p_t65_closed, ph_t65_cl = seed_for_filter("T65 Closed", 90, "T65_Dec_NC", "closed")
+p_t65_sup, ph_t65_sup   = seed_for_filter("T65 Suppressed Phone", 90, "T65_Dec_NC", "new", suppress=True)
+
+# Defaults: T65 + min_score=70 + dialable stages + not suppressed
+with db.connect() as conn:
+    default_phones = set(number_lookup._pending_phones(conn, limit=100))
+check("default picks the high-score T65 lead", ph_t65_high in default_phones)
+check("default drops the low-score T65 lead", ph_t65_low not in default_phones)
+check("default drops OSCR (different source pattern)", ph_oscr_hi not in default_phones)
+check("default drops Dialer_Existing (not a T65 source)", ph_dialer not in default_phones)
+check("default drops the DNC-staged lead", ph_t65_dnc not in default_phones)
+check("default drops the closed-staged lead", ph_t65_cl not in default_phones)
+check("default drops the suppressed phone", ph_t65_sup not in default_phones)
+
+# Caller can opt-in to OSCR
+with db.connect() as conn:
+    with_oscr = set(number_lookup._pending_phones(
+        conn, limit=100, source_patterns=["T65_", "OSCR"]))
+check("opt-in OSCR pattern picks the OSCR lead", ph_oscr_hi in with_oscr)
+check("opt-in OSCR still excludes Dialer_Existing", ph_dialer not in with_oscr)
+
+# Caller can lower the score floor
+with db.connect() as conn:
+    no_floor = set(number_lookup._pending_phones(conn, limit=100, min_score=0))
+check("min_score=0 picks up the low-score T65 lead", ph_t65_low in no_floor)
+
+# Endpoint accepts the same filters via JSON body and reports them back
+import json as _json
+import app as appmod
+appmod.db.connect = db.connect
+client = appmod.app.test_client()
+
+# Re-stub lookup_one so a live call attempt would no-op
+number_lookup.lookup_one = lambda phone: {"phone": phone, "line_type": "mobile", "carrier": "Verizon", "portable": False, "raw": {}}
+# Reset spend so the runner doesn't refuse to start due to earlier sections
+with db.connect() as conn:
+    conn.execute("DELETE FROM oscr_ingestion_state WHERE key LIKE 'lookup_spend_%'")
+
+r = client.post("/agent/admin/number-lookup",
+                data=_json.dumps({"limit": 5, "min_score": 80, "source_patterns": ["T65_"]}),
+                content_type="application/json")
+check("admin/number-lookup returns 200", r.status_code == 200)
+j = r.get_json()
+check("response echoes the filters",
+      j["filters"]["min_score"] == 80 and j["filters"]["source_patterns"] == ["T65_"])
+check("endpoint targets at least the high T65 lead", j["processed"] >= 1)
+
 
 passed = sum(1 for _, ok in results if ok)
 print(f"\n{'='*50}\n{passed}/{len(results)} PASSED" + ("  [OK] ALL GOOD" if passed == len(results) else "  *** FAILURES ***"))

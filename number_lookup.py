@@ -227,35 +227,106 @@ def _mark_disconnected(conn, phone: str) -> None:
 
 # ----------------------------------------------------- bulk runner
 
-def _pending_phones(conn, limit: int) -> list:
-    rows = conn.execute(
-        """SELECT e164 FROM phone_numbers
-           WHERE (line_type IS NULL OR line_type='')
-             AND COALESCE(status,'active') NOT IN ('bad','deactivated')
-             AND e164 LIKE '+%'
-           ORDER BY id ASC
-           LIMIT ?""",
-        (limit,),
-    ).fetchall()
-    return [r["e164"] for r in rows]
+DEFAULT_SOURCE_PATTERNS = [p.strip() for p in os.getenv(
+    "TELNYX_LOOKUP_SOURCE_PATTERNS", "T65_").split(",") if p.strip()]
+DEFAULT_MIN_SCORE = int(os.getenv("TELNYX_LOOKUP_MIN_SCORE", "70"))
+DEFAULT_DIALABLE_STAGES = ("new", "attempted", "voicemail", "callback")
+
+
+def _pending_phones(conn, limit: int, min_score: int = DEFAULT_MIN_SCORE,
+                    source_patterns=None, owner: str = "",
+                    dialable_stages=DEFAULT_DIALABLE_STAGES) -> list:
+    """Return phones still needing classification, filtered by score / source /
+    owner / stage so a bulk pass only spends money on leads we actually plan to
+    call. Defaults: high-scoring T65 leads in the active dialing pool."""
+    source_patterns = source_patterns if source_patterns is not None else DEFAULT_SOURCE_PATTERNS
+
+    where = [
+        "(ph.line_type IS NULL OR ph.line_type='')",
+        "COALESCE(ph.status,'active') NOT IN ('bad','deactivated')",
+        "ph.e164 LIKE '+%'",
+    ]
+    params = []
+
+    if min_score and min_score > 0:
+        where.append("COALESCE(p.lead_score, 0) >= ?")
+        params.append(int(min_score))
+
+    if source_patterns:
+        clauses = []
+        for pattern in source_patterns:
+            # Allow callers to pass either 'T65_' (prefix) or 'OSCR' (exact-ish).
+            # A trailing % is appended unless the caller already escaped/anchored it.
+            like = pattern if "%" in pattern else f"{pattern}%"
+            clauses.append("p.source LIKE ?")
+            params.append(like)
+        where.append("(" + " OR ".join(clauses) + ")")
+
+    if owner:
+        where.append("p.owner=?")
+        params.append(owner)
+
+    if dialable_stages:
+        placeholders = ",".join("?" * len(dialable_stages))
+        where.append(f"p.stage IN ({placeholders})")
+        params.extend(dialable_stages)
+
+    # Person-scope suppression rules out DNC by stage, but a person-scope
+    # suppression entry can also exist independently — exclude them.
+    where.append("NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.scope='person' AND s.value=CAST(p.id AS TEXT))")
+    where.append("NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.scope='phone' AND s.value=ph.e164)")
+
+    sql = (
+        "SELECT DISTINCT ph.e164 FROM phone_numbers ph "
+        "JOIN people p ON p.id=ph.person_id "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY p.lead_score DESC, ph.id ASC LIMIT ?"
+    )
+    params.append(int(limit))
+    return [r["e164"] for r in conn.execute(sql, params).fetchall()]
 
 
 def lookup_pending(limit: Optional[int] = None,
                    max_spend_usd: Optional[float] = None,
-                   sleep_between_seconds: float = 0.05) -> dict:
-    """Find phones with no line_type and look them up.
+                   sleep_between_seconds: float = 0.05,
+                   min_score: Optional[int] = None,
+                   source_patterns: Optional[list] = None,
+                   owner: str = "",
+                   dialable_stages: Optional[tuple] = None) -> dict:
+    """Find phones worth classifying and look them up.
+
+    DEFAULTS ARE COST-CONSERVATIVE: only T65-source leads with lead_score >= 70
+    that are still in the active dialing pool. This stops a bulk pass from
+    spending $0.004 per row on leads we'd never call anyway.
+
+    Override min_score=0 / source_patterns=[] to widen the net (e.g. when wiring
+    OSCR up tomorrow, include 'OSCR' in source_patterns).
 
     Returns a summary {requested, processed, classified, deactivated, errors,
-    spend_today_usd, stopped_for_budget}.
+    spend_today_usd, stopped_for_budget, filters}.
     """
     _ensure_columns()
     limit = int(limit or DEFAULT_BATCH)
     budget = float(max_spend_usd if max_spend_usd is not None else DAILY_BUDGET_USD)
+    if min_score is None:
+        min_score = DEFAULT_MIN_SCORE
+    if source_patterns is None:
+        source_patterns = list(DEFAULT_SOURCE_PATTERNS)
+    if dialable_stages is None:
+        dialable_stages = DEFAULT_DIALABLE_STAGES
 
     summary = {
         "requested": 0, "processed": 0, "classified": 0, "deactivated": 0,
         "errors": 0, "spend_today_usd": 0.0, "stopped_for_budget": False,
         "messages": [],
+        "filters": {
+            "min_score": min_score,
+            "source_patterns": list(source_patterns),
+            "owner": owner,
+            "dialable_stages": list(dialable_stages),
+            "budget_usd": budget,
+            "limit": limit,
+        },
     }
 
     if not _api_key():
@@ -263,7 +334,9 @@ def lookup_pending(limit: Optional[int] = None,
         return summary
 
     with db.connect() as conn:
-        phones = _pending_phones(conn, limit)
+        phones = _pending_phones(conn, limit, min_score=min_score,
+                                 source_patterns=source_patterns, owner=owner,
+                                 dialable_stages=dialable_stages)
         summary["requested"] = len(phones)
         spend = _today_spend(conn)
         if spend >= budget:

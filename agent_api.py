@@ -1052,19 +1052,37 @@ def admin_appointment_undo():
 def admin_number_lookup():
     """Bulk-classify pending phones via Telnyx Number Lookup.
 
-    Body (all optional):
-      {limit: 100, max_spend_usd: 5, sleep_between_seconds: 0.05}
+    Body (all optional, defaults are cost-conservative):
+      {
+        "limit": 100,
+        "max_spend_usd": 5,
+        "sleep_between_seconds": 0.05,
+        "min_score": 70,                 # only score-worthy leads
+        "source_patterns": ["T65_"],     # only T65 lists by default
+        "owner": "chris",                # filter by agent owner
+        "dialable_stages": ["new","attempted","voicemail","callback"]
+      }
 
     The runner refuses to start if today's cumulative spend already exceeds
     the cap; safe to call repeatedly. Returns a summary including the
-    deactivated / classified counts and remaining budget.
+    filters used, deactivated / classified counts, and remaining budget.
     """
     import number_lookup
     d = request.get_json(silent=True) or {}
+    source_patterns = d.get("source_patterns")
+    if source_patterns is not None and not isinstance(source_patterns, list):
+        return jsonify({"error": "source_patterns must be a list of prefixes"}), 400
+    dialable = d.get("dialable_stages")
+    if dialable is not None and not isinstance(dialable, list):
+        return jsonify({"error": "dialable_stages must be a list of stages"}), 400
     summary = number_lookup.lookup_pending(
         limit=d.get("limit"),
         max_spend_usd=d.get("max_spend_usd"),
         sleep_between_seconds=float(d.get("sleep_between_seconds") or 0.05),
+        min_score=d.get("min_score"),
+        source_patterns=source_patterns,
+        owner=(d.get("owner") or "").strip(),
+        dialable_stages=tuple(dialable) if dialable else None,
     )
     return jsonify({"ok": True, **summary})
 

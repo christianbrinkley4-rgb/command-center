@@ -1160,6 +1160,35 @@ def index():
     return render_template("index.html")
 
 
+# Reference numbers shown on the /today page so the operator has them at hand
+# during live calls. Anything sensitive (license #, BL back office) is read from
+# env so it's never in the public git repo.
+def _reference_numbers():
+    return [
+        {"label": "Medicare (verify info, eligibility)", "number": "1-800-MEDICARE", "alt": "1-800-633-4227",
+         "context": "Recommend to prospect for unbiased info on all plans available."},
+        {"label": "NC SHIIP (state senior insurance program)", "number": "1-855-408-1212",
+         "context": "Free unbiased Medicare counseling. Reference if a prospect wants a second opinion."},
+        {"label": "National Do-Not-Call Registry", "number": "1-888-382-1222",
+         "context": "If a prospect asks to be removed from EVERY list. Add them to internal DNC first."},
+        {"label": "Bankers Life back office", "number": os.getenv("BL_BACK_OFFICE_PHONE", "(set BL_BACK_OFFICE_PHONE)"),
+         "context": "Underwriting / app status questions."},
+        {"label": "Bankers Life agent support", "number": os.getenv("BL_AGENT_SUPPORT_PHONE", "(set BL_AGENT_SUPPORT_PHONE)"),
+         "context": "Compliance, TPMO wording, license/appointment questions."},
+        {"label": "Your NC resident license #", "number": os.getenv("OPERATOR_LICENSE_NUM", "(set OPERATOR_LICENSE_NUM)"),
+         "context": "State if a prospect asks to verify your credentials."},
+        {"label": "CMS Medicare.gov", "number": "Medicare.gov",
+         "context": "Send prospects here to research plans on their own."},
+    ]
+
+
+CMS_TPMO_DISCLAIMER = (
+    "We do not offer every plan available in your area. Any information we "
+    "provide is limited to those plans we do offer in your area. Please contact "
+    "Medicare.gov or 1-800-MEDICARE to get information on all of your options."
+)
+
+
 @app.route("/today")
 def today_view():
     """A single-page operator view: live queue top, today's calls, today's
@@ -1241,6 +1270,8 @@ def today_view():
         appts_last_7=recent_appts,
         new_leads_today=new_leads_today,
         warnings=warnings,
+        reference_numbers=_reference_numbers(),
+        tpmo_disclaimer=CMS_TPMO_DISCLAIMER,
     )
 
 

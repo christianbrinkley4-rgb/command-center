@@ -171,6 +171,30 @@
             <div class="empty">No callbacks queued for the next 3 days.</div>
           {% endif %}
         </div>
+
+        <div class="panel" style="margin-top: 20px;">
+          <h2>Reference numbers (keep at hand on calls)</h2>
+          <table>
+            <tr><th>Purpose</th><th>Number</th></tr>
+            {% for ref in reference_numbers %}
+              <tr>
+                <td>
+                  <div>{{ ref.label }}</div>
+                  <div class="small muted">{{ ref.context }}</div>
+                </td>
+                <td>
+                  <strong>{{ ref.number }}</strong>
+                  {% if ref.alt %}<div class="small muted">{{ ref.alt }}</div>{% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </table>
+        </div>
+
+        <div class="panel" style="margin-top: 20px; border-color: rgba(247,215,116,0.4);">
+          <h2 style="color: var(--gold);">CMS TPMO disclaimer (read within first 60s of any sales call)</h2>
+          <div style="font-size: 13px; line-height: 1.5;">{{ tpmo_disclaimer }}</div>
+        </div>
       </div>
     </div>
   </div>
