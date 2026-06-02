@@ -708,6 +708,22 @@ CITY_ALIASES_CLOUD = {
 }
 
 
+def _lookup_filter_active():
+    try:
+        import number_lookup
+        return number_lookup.filter_enabled()
+    except Exception:
+        return False
+
+
+def _is_callable_line_type(line_type):
+    try:
+        import number_lookup
+        return number_lookup.is_callable_line_type(line_type)
+    except Exception:
+        return True
+
+
 def _drive_minutes(city):
     return geo_policy.drive_minutes(city)
 
@@ -868,6 +884,18 @@ def _build_ranked_queue(owner="", limit=5000, agenda_date=None, city_filter=None
             ph = phone_of(pid)
             if not ph or suppressed(ph):
                 return
+            # Drop confirmed-landline / deactivated phones once Telnyx Number
+            # Lookup has classified them. Toggle CC_LOOKUP_FILTER_ENABLED off to
+            # short-circuit this (useful while the lookup pass is still running).
+            if _lookup_filter_active():
+                phone_meta = conn.execute(
+                    "SELECT line_type, status FROM phone_numbers WHERE e164=? LIMIT 1", (ph,)
+                ).fetchone()
+                if phone_meta:
+                    if str(phone_meta["status"] or "").lower() == "deactivated":
+                        return
+                    if not _is_callable_line_type(phone_meta["line_type"] or ""):
+                        return
             status = queue_policy.retry_status(conn, pid, ph, r["stage"], qtype, agenda_day)
             if not status["allowed"]:
                 return
@@ -1130,6 +1158,90 @@ def api_run_automations():
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/today")
+def today_view():
+    """A single-page operator view: live queue top, today's calls, today's
+    appointments, pending callbacks, system warnings. Refreshes every 30s."""
+    owner = (request.args.get("owner") or "chris").strip()
+    today_iso = date.today().isoformat()
+
+    queue = _build_ranked_queue(owner=owner, limit=10)
+
+    with db.connect() as conn:
+        today_calls = conn.execute(
+            """SELECT c.id, c.dialed_at, c.disposition, c.disposition_category,
+                      c.agent, c.phone, c.live_talk_seconds,
+                      p.full_name, p.city, p.source, p.lead_score
+               FROM call_attempts c LEFT JOIN people p ON p.id=c.person_id
+               WHERE substr(c.dialed_at,1,10)=?
+               ORDER BY c.dialed_at DESC""",
+            (today_iso,),
+        ).fetchall()
+
+        disp_counts = {}
+        for row in today_calls:
+            cat = row["disposition_category"] or "unknown"
+            disp_counts[cat] = disp_counts.get(cat, 0) + 1
+
+        today_appts = conn.execute(
+            """SELECT a.id, a.scheduled_at, a.status, a.agent, a.notes,
+                      p.full_name, p.city, p.id person_id
+               FROM appointments a LEFT JOIN people p ON p.id=a.person_id
+               WHERE substr(a.scheduled_at,1,10)=?
+               ORDER BY a.scheduled_at""",
+            (today_iso,),
+        ).fetchall()
+
+        pending_callbacks = conn.execute(
+            """SELECT s.id, s.due_at, s.reason, s.person_id,
+                      p.full_name, p.city, p.lead_score
+               FROM scheduled_tasks s LEFT JOIN people p ON p.id=s.person_id
+               WHERE s.kind='call' AND s.status='pending'
+                 AND date(s.due_at) BETWEEN date(?) AND date(?, '+3 days')
+               ORDER BY s.due_at LIMIT 10""",
+            (today_iso, today_iso),
+        ).fetchall()
+
+        recent_appts = conn.execute(
+            """SELECT COUNT(*) n FROM appointments WHERE substr(created_at,1,10) >= date(?, '-7 days')""",
+            (today_iso,),
+        ).fetchone()["n"]
+
+        new_leads_today = conn.execute(
+            """SELECT COUNT(*) n FROM people WHERE substr(first_seen_at,1,10)=?""",
+            (today_iso,),
+        ).fetchone()["n"]
+
+    warnings = []
+    try:
+        import number_lookup
+        spend = number_lookup.today_spend()
+        if spend >= number_lookup.DAILY_BUDGET_USD * 0.8:
+            warnings.append({
+                "level": "warn",
+                "text": f"Telnyx lookup spend today ${spend:.2f} of ${number_lookup.DAILY_BUDGET_USD:.2f}.",
+            })
+    except Exception:
+        pass
+
+    if not queue:
+        warnings.append({"level": "warn", "text": f"Queue empty for owner={owner}. New imports or filter relaxation needed."})
+
+    return render_template(
+        "today.html",
+        owner=owner,
+        today=today_iso,
+        queue=queue,
+        today_calls=[dict(r) for r in today_calls][:50],
+        disposition_counts=disp_counts,
+        appointments_today=[dict(r) for r in today_appts],
+        pending_callbacks=[dict(r) for r in pending_callbacks],
+        appts_last_7=recent_appts,
+        new_leads_today=new_leads_today,
+        warnings=warnings,
+    )
 
 
 # ----------------------------- background sync -----------------------------

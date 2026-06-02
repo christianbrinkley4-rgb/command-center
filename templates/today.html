@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="30">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Today &mdash; Command Center</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0c1116; --panel: #141b22; --panel2: #1a232c; --line: #243140;
+      --text: #e4ecf2; --muted: #94a4b3; --accent: #5fc7ff; --warn: #ffb454;
+      --good: #5fd49a; --bad: #ff7676; --gold: #f7d774;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+           font-family: Inter, system-ui, sans-serif; font-size: 14px; }
+    a { color: var(--accent); text-decoration: none; }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 22px; margin: 0 0 4px; font-weight: 700; }
+    .subhead { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+    .grid { display: grid; gap: 20px; grid-template-columns: 1.4fr 1fr; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+    .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600;
+                text-transform: uppercase; letter-spacing: 0.5px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+             font-size: 13px; vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase;
+         letter-spacing: 0.4px; }
+    td.right, th.right { text-align: right; }
+    .score { display: inline-block; min-width: 32px; text-align: center; padding: 2px 8px;
+             border-radius: 4px; background: var(--panel2); font-weight: 600; }
+    .score.high { color: var(--good); background: rgba(95,212,154,0.12); }
+    .score.low { color: var(--muted); }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+            background: var(--panel2); color: var(--muted); }
+    .pill.hot_fresh { background: rgba(95,199,255,0.15); color: var(--accent); }
+    .pill.callback { background: rgba(247,215,116,0.18); color: var(--gold); }
+    .pill.scheduled_call { background: rgba(247,215,116,0.18); color: var(--gold); }
+    .pill.retry { background: rgba(255,180,84,0.12); color: var(--warn); }
+    .pill.live_conversation { color: var(--good); background: rgba(95,212,154,0.12); }
+    .pill.voicemail { color: var(--accent); background: rgba(95,199,255,0.10); }
+    .pill.no_answer { color: var(--muted); }
+    .pill.bad_number, .pill.dropped { color: var(--bad); background: rgba(255,118,118,0.10); }
+    .kpis { display: grid; gap: 12px; grid-template-columns: repeat(3, 1fr); margin-bottom: 20px; }
+    .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           padding: 14px 16px; }
+    .kpi .num { font-size: 24px; font-weight: 700; }
+    .kpi .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .warn-banner { background: rgba(255,180,84,0.10); border: 1px solid rgba(255,180,84,0.3);
+                   color: var(--warn); padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .nav a { margin-right: 14px; color: var(--muted); font-size: 12px; text-transform: uppercase;
+             letter-spacing: 0.5px; }
+    .nav a.active { color: var(--text); }
+    .empty { color: var(--muted); font-style: italic; padding: 12px 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="nav">
+      <a href="/">Dashboard</a>
+      <a href="/today" class="active">Today</a>
+    </div>
+    <h1>Today &mdash; {{ owner }}</h1>
+    <div class="subhead">{{ today }} &middot; auto-refreshes every 30s</div>
+
+    {% for w in warnings %}
+      <div class="warn-banner">{{ w.text }}</div>
+    {% endfor %}
+
+    <div class="kpis">
+      <div class="kpi"><div class="num">{{ today_calls|length }}</div><div class="lbl">Calls today</div></div>
+      <div class="kpi"><div class="num">{{ appointments_today|length }}</div><div class="lbl">Appointments today</div></div>
+      <div class="kpi"><div class="num">{{ new_leads_today }}</div><div class="lbl">New leads imported today</div></div>
+    </div>
+
+    <div class="grid">
+      <div>
+        <div class="panel">
+          <h2>Next 10 in the dial order</h2>
+          {% if queue %}
+            <table>
+              <tr><th>#</th><th>Tier</th><th>Name</th><th>City</th><th>Source</th><th class="right">Score</th></tr>
+              {% for row in queue %}
+                <tr>
+                  <td class="muted">{{ loop.index }}</td>
+                  <td><span class="pill {{ row.Queue_Type }}">{{ row.Queue_Type }}</span></td>
+                  <td>{{ row.Name or '&mdash;'|safe }}</td>
+                  <td>{{ row.City or '' }}</td>
+                  <td class="small muted">{{ row.Source or '' }}</td>
+                  <td class="right"><span class="score {{ 'high' if (row.Lead_Score or 0) >= 70 else 'low' }}">{{ row.Lead_Score or '-' }}</span></td>
+                </tr>
+              {% endfor %}
+            </table>
+          {% else %}
+            <div class="empty">No leads in the queue right now.</div>
+          {% endif %}
+        </div>
+
+        <div class="panel" style="margin-top: 20px;">
+          <h2>Today&rsquo;s calls ({{ today_calls|length }})</h2>
+          {% if disposition_counts %}
+            <div style="margin-bottom: 14px;">
+              {% for cat, n in disposition_counts.items() %}
+                <span class="pill {{ cat }}">{{ cat }}: {{ n }}</span>
+              {% endfor %}
+            </div>
+          {% endif %}
+          {% if today_calls %}
+            <table>
+              <tr><th>Time</th><th>Name</th><th>City</th><th>Disposition</th><th class="right">Score</th></tr>
+              {% for c in today_calls[:20] %}
+                <tr>
+                  <td class="small muted">{{ (c.dialed_at or '')[11:16] }}</td>
+                  <td>{{ c.full_name or '&mdash;'|safe }}</td>
+                  <td>{{ c.city or '' }}</td>
+                  <td><span class="pill {{ c.disposition_category or 'unknown' }}">{{ c.disposition or '' }}</span></td>
+                  <td class="right"><span class="score">{{ c.lead_score or '-' }}</span></td>
+                </tr>
+              {% endfor %}
+            </table>
+            {% if today_calls|length > 20 %}<div class="muted small" style="margin-top: 8px;">+ {{ today_calls|length - 20 }} more</div>{% endif %}
+          {% else %}
+            <div class="empty">No calls logged yet today.</div>
+          {% endif %}
+        </div>
+      </div>
+
+      <div>
+        <div class="panel">
+          <h2>Appointments today</h2>
+          {% if appointments_today %}
+            <table>
+              <tr><th>Time</th><th>Name</th><th>Status</th></tr>
+              {% for a in appointments_today %}
+                <tr>
+                  <td class="small muted">{{ (a.scheduled_at or '')[11:16] }}</td>
+                  <td>
+                    {% if a.person_id %}<a href="/?lead={{ a.person_id }}">{{ a.full_name or '&mdash;'|safe }}</a>
+                    {% else %}{{ a.full_name or '&mdash;'|safe }}{% endif %}
+                    <div class="small muted">{{ a.city or '' }}</div>
+                  </td>
+                  <td><span class="pill">{{ a.status }}</span></td>
+                </tr>
+              {% endfor %}
+            </table>
+          {% else %}
+            <div class="empty">No appointments today.</div>
+          {% endif %}
+          <div class="small muted" style="margin-top: 12px;">Last 7 days: {{ appts_last_7 }} booked</div>
+        </div>
+
+        <div class="panel" style="margin-top: 20px;">
+          <h2>Pending callbacks (next 3 days)</h2>
+          {% if pending_callbacks %}
+            <table>
+              <tr><th>When</th><th>Name</th><th class="right">Score</th></tr>
+              {% for cb in pending_callbacks %}
+                <tr>
+                  <td class="small muted">{{ (cb.due_at or '')[5:16] }}</td>
+                  <td>{{ cb.full_name or '&mdash;'|safe }} <div class="small muted">{{ cb.city or '' }}</div></td>
+                  <td class="right"><span class="score">{{ cb.lead_score or '-' }}</span></td>
+                </tr>
+              {% endfor %}
+            </table>
+          {% else %}
+            <div class="empty">No callbacks queued for the next 3 days.</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
