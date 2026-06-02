@@ -216,10 +216,16 @@ def heuristic_score(person_row: dict, conn=None, line_type: str = "",
                     hour: Optional[int] = None) -> tuple[int, dict]:
     """Pure-Python deterministic score in [0, 100] with explanation dict.
 
-    `hour` is provided for tests; in production it defaults to the current
-    local hour so the queue reorders within a tier toward the calling sweet
-    spot at the moment it's built.
+    Intentionally does NOT bake an hour-of-day bonus into the persistent score.
+    A lead's intrinsic call-priority doesn't change because it happened to be
+    scored at 3am vs 11am. Hour-of-day affects WHEN to dial, which is the
+    dialer's pacing problem, not the scoring problem. If we want hour-weighted
+    queue ordering we apply it as a dynamic tiebreaker in _build_ranked_queue
+    so the same lead floats correctly regardless of when it was last scored.
+
+    `hour` is accepted for API stability with prior versions but no longer used.
     """
+    _ = hour  # explicitly unused; kept for backward-compatible call sites
     prior = _source_prior(person_row.get("source", ""))
     bday = _bday_target_bonus(person_row.get("birthday", ""))
     drive = _drive_bonus(person_row.get("city", ""))
@@ -228,9 +234,8 @@ def heuristic_score(person_row: dict, conn=None, line_type: str = "",
     history_adj, history_signals = (
         _call_history_signals(conn, person_row.get("id")) if conn else (0, {"prior_calls": 0})
     )
-    hour_bonus = _hour_bonus(hour)
 
-    raw = prior + bday + drive + completeness + line + history_adj + hour_bonus
+    raw = prior + bday + drive + completeness + line + history_adj
     score = max(0, min(100, raw))
     signals = {
         "source_prior": prior,
@@ -239,7 +244,6 @@ def heuristic_score(person_row: dict, conn=None, line_type: str = "",
         "completeness_bonus": completeness,
         "line_type_adjustment": line,
         "history_adjustment": history_adj,
-        "hour_bonus": hour_bonus,
         "history_signals": history_signals,
         "raw_total": raw,
         "final_score": score,

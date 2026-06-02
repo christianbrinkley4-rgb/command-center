@@ -198,23 +198,14 @@ j = r.get_json()
 check("admin/score reports scored count", j.get("scored") == 1)
 
 
-print("\n=== Hour-of-day signal nudges score within bounds ===")
-# Score the same person at 11am vs 3am — the 11am call should be higher by
-# the bonus amount, but the total stays <= 100.
+print("\n=== Score is time-invariant (does NOT change based on scoring hour) ===")
+# A lead's intrinsic call-priority must be the same whether it was scored at
+# 3am or 11am. The dialer pacing handles when to call; the score is identity.
 person = {"id": 0, "source": "T65_Dec_NC", "city": "Greensboro",
           "birthday": "1962-03-04", "full_name": "Hour Test"}
-score_11, sig_11 = lead_scoring.heuristic_score(person, hour=11)
-score_3, sig_3 = lead_scoring.heuristic_score(person, hour=3)
-check("11am score is at least as high as 3am", score_11 >= score_3)
-check("11am gets the +6 bonus", sig_11["hour_bonus"] == 6)
-check("3am gets no bonus", sig_3["hour_bonus"] == 0)
-check("bonus is included in raw_total", sig_11["raw_total"] - sig_3["raw_total"] == 6 or score_11 == 100)
-# Cap test
-maxed = {"id": 0, "source": "OSCR_Hot", "city": "Greensboro",
-         "birthday": "1962-06-15", "full_name": "Max Score",
-         "address": "x", "email": "y@z", "county": "Guilford"}
-score_max, _ = lead_scoring.heuristic_score(maxed, hour=11)
-check("score still clamped at 100 even with hour bonus", score_max <= 100)
+score_11, _ = lead_scoring.heuristic_score(person, hour=11)
+score_3, _ = lead_scoring.heuristic_score(person, hour=3)
+check("score is identical regardless of scoring hour", score_11 == score_3)
 
 
 print("\n=== BATCH_MAX default raised ===")
