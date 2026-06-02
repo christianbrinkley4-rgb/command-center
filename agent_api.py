@@ -1133,6 +1133,120 @@ def admin_score_leads():
     return jsonify({"ok": True, **result})
 
 
+def _chunked(seq, n=400):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+# Child tables that reference people(id) via person_id. Deleted before the
+# parent rows so foreign-key constraints (PRAGMA foreign_keys=ON) are satisfied.
+# Some are created by other modules and may not exist — each delete is guarded.
+_PERSON_CHILD_TABLES = [
+    "transcripts", "call_attempts", "messages", "appointments",
+    "person_notes", "deals", "scheduled_tasks", "oscr_seen_leads",
+    "phone_numbers",
+]
+
+
+@agent_api.route("/agent/admin/leads/purge", methods=["POST"])
+def admin_leads_purge():
+    """DESTRUCTIVE: permanently delete leads matching EXPLICIT criteria.
+
+    Body:
+      {
+        "sources": ["T65_Dec_NC", "T65_Dec_VA"],   # optional, exact source match
+        "birth_year": 1957,                          # optional, matched in birthday
+        "person_ids": [1,2,3],                       # optional, explicit ids
+        "dry_run": true,                             # preview counts, delete nothing
+        "confirm": true                              # required to actually delete
+      }
+
+    Multiple criteria combine with AND (narrows the set — safer). At least one
+    criterion is required; refuses to run with none. Phone-scope suppressions
+    are intentionally KEPT so DNC protection survives the purge. Every purge is
+    written to the audit log.
+    """
+    d = request.get_json(silent=True) or {}
+    sources = d.get("sources") or []
+    birth_year = d.get("birth_year")
+    person_ids = d.get("person_ids") or []
+    dry_run = bool(d.get("dry_run", False))
+    confirm = bool(d.get("confirm", False))
+
+    if not sources and not birth_year and not person_ids:
+        return jsonify({"error": "refusing to purge with no criteria — "
+                                 "specify sources, birth_year, and/or person_ids"}), 400
+    if not isinstance(sources, list) or not isinstance(person_ids, list):
+        return jsonify({"error": "sources and person_ids must be lists"}), 400
+    if not dry_run and not confirm:
+        return jsonify({"error": "set confirm=true to delete, or dry_run=true to preview"}), 400
+
+    where, params = [], []
+    if sources:
+        where.append("(" + " OR ".join(["source = ?"] * len(sources)) + ")")
+        params.extend([_clean(s) for s in sources])
+    if birth_year:
+        by = str(birth_year).strip()
+        # Match the year in either MM/DD/YYYY or YYYY-MM-DD birthday formats.
+        where.append("(birthday LIKE ? OR birthday LIKE ?)")
+        params.extend([f"%{by}", f"{by}-%"])
+    if person_ids:
+        where.append("id IN (" + ",".join("?" * len(person_ids)) + ")")
+        params.extend([int(x) for x in person_ids])
+    clause = " AND ".join(where)
+
+    with db.connect() as conn:
+        target = [r["id"] for r in conn.execute(f"SELECT id FROM people WHERE {clause}", params)]
+
+        if dry_run:
+            child_counts = {}
+            for tbl in _PERSON_CHILD_TABLES:
+                total = 0
+                for chunk in _chunked(target):
+                    try:
+                        total += conn.execute(
+                            f"SELECT COUNT(*) n FROM {tbl} WHERE person_id IN ({','.join('?' * len(chunk))})",
+                            chunk).fetchone()["n"]
+                    except Exception:
+                        pass
+                child_counts[tbl] = total
+            return jsonify({"ok": True, "dry_run": True, "matched_people": len(target),
+                            "would_delete_children": child_counts,
+                            "criteria": {"sources": sources, "birth_year": birth_year,
+                                         "person_ids_count": len(person_ids)}})
+
+        if not target:
+            return jsonify({"ok": True, "deleted_people": 0, "message": "no rows matched"}), 200
+
+        child_deleted = {}
+        for tbl in _PERSON_CHILD_TABLES:
+            deleted = 0
+            for chunk in _chunked(target):
+                try:
+                    cur = conn.execute(
+                        f"DELETE FROM {tbl} WHERE person_id IN ({','.join('?' * len(chunk))})", chunk)
+                    deleted += cur.rowcount
+                except Exception:
+                    pass  # table may not exist in this DB
+            child_deleted[tbl] = deleted
+
+        people_deleted = 0
+        for chunk in _chunked(target):
+            cur = conn.execute(
+                f"DELETE FROM people WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+            people_deleted += cur.rowcount
+
+        db.audit(conn, "admin", "purge", "leads_purged",
+                 f"people={people_deleted} sources={sources} birth_year={birth_year} "
+                 f"children={child_deleted}", _actor())
+
+    return jsonify({"ok": True, "deleted_people": people_deleted,
+                    "deleted_children": child_deleted,
+                    "criteria": {"sources": sources, "birth_year": birth_year,
+                                 "person_ids_count": len(person_ids)},
+                    "note": "phone-scope suppressions kept (DNC protection survives)"})
+
+
 @agent_api.route("/agent/admin/lead/<int:pid>/dnc", methods=["POST"])
 def admin_lead_dnc(pid):
     """Manual DNC: suppresses the person and all their phones, sets stage='dnc',
