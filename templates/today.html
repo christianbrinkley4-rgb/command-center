@@ -72,6 +72,24 @@
       <div class="warn-banner">{{ w.text }}</div>
     {% endfor %}
 
+    <!-- System health row -->
+    <div class="kpis" style="grid-template-columns: repeat(5, 1fr); margin-bottom: 14px;">
+      <div class="kpi"><div class="num">{{ system_health.queue_depth }}</div><div class="lbl">Queue depth (top)</div></div>
+      <div class="kpi"><div class="num">{{ system_health.leads_never_called }}</div><div class="lbl">Never called yet</div></div>
+      <div class="kpi"><div class="num">{{ system_health.pending_tasks_due_today }}</div><div class="lbl">Tasks due today</div></div>
+      <div class="kpi" style="min-width:0;"><div class="num small" style="font-size: 13px;">{{ (system_health.last_call_at or '—')[:16] }}</div><div class="lbl">Last call</div></div>
+      <div class="kpi" style="min-width:0;"><div class="num small" style="font-size: 13px;">{{ (system_health.last_import_at or '—')[:16] }}</div><div class="lbl">Last import</div></div>
+    </div>
+
+    <!-- Lead search -->
+    <div class="panel" style="margin-bottom: 20px;">
+      <h2>Find a lead</h2>
+      <input id="leadSearch" type="text" placeholder="Name or phone digits..."
+             style="width: 100%; max-width: 400px; padding: 8px 12px; background: var(--panel2); color: var(--text);
+                    border: 1px solid var(--line); border-radius: 6px; font-family: Inter, sans-serif; font-size: 14px;">
+      <div id="searchResults" style="margin-top: 12px;"></div>
+    </div>
+
     <div class="kpis">
       <div class="kpi"><div class="num">{{ today_calls|length }}</div><div class="lbl">Calls today</div></div>
       <div class="kpi"><div class="num">{{ appointments_today|length }}</div><div class="lbl">Appointments today</div></div>
@@ -197,6 +215,67 @@
         </div>
       </div>
     </div>
+
+    <!-- 7-day trend -->
+    <div class="panel" style="margin-top: 20px;">
+      <h2>Last 7 days</h2>
+      {% if seven_day_trend %}
+        <table>
+          <tr><th>Date</th><th class="right">Calls</th><th class="right">Connects</th><th class="right">Connect %</th><th class="right">VMs</th><th class="right">Bad #s</th><th class="right">Appts</th></tr>
+          {% for d in seven_day_trend %}
+            <tr>
+              <td>{{ d.date }}</td>
+              <td class="right">{{ d.total }}</td>
+              <td class="right"><span class="score {{ 'high' if d.connects >= 5 else 'low' }}">{{ d.connects }}</span></td>
+              <td class="right">{{ d.connect_pct }}%</td>
+              <td class="right muted">{{ d.voicemails }}</td>
+              <td class="right muted">{{ d.bad }}</td>
+              <td class="right">{{ d.appointments }}</td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% else %}
+        <div class="empty">No call activity in the last 7 days.</div>
+      {% endif %}
+    </div>
   </div>
+
+  <script>
+    // Light, dependency-free search. Hits /api/today/search and lists matches.
+    (function() {
+      var input = document.getElementById('leadSearch');
+      var results = document.getElementById('searchResults');
+      var t;
+      input.addEventListener('input', function() {
+        clearTimeout(t);
+        var q = input.value.trim();
+        if (q.length < 2) { results.innerHTML = ''; return; }
+        t = setTimeout(function() {
+          fetch('/api/today/search?q=' + encodeURIComponent(q), {credentials: 'include'})
+            .then(r => r.json())
+            .then(data => {
+              if (!data.leads || !data.leads.length) {
+                results.innerHTML = '<div class="muted small">No matches.</div>';
+                return;
+              }
+              var html = '<table><tr><th>Name</th><th>Phone</th><th>City</th><th>Source</th><th class="right">Score</th><th>Stage</th></tr>';
+              data.leads.forEach(function(l) {
+                html += '<tr><td><a href="/?lead=' + l.id + '">' + (l.full_name || '—') + '</a></td>' +
+                        '<td class="small muted">' + (l.phone || '') + '</td>' +
+                        '<td>' + (l.city || '') + '</td>' +
+                        '<td class="small muted">' + (l.source || '') + '</td>' +
+                        '<td class="right"><span class="score ' + ((l.lead_score || 0) >= 70 ? 'high' : 'low') + '">' + (l.lead_score || '-') + '</span></td>' +
+                        '<td><span class="pill ' + (l.stage || '') + '">' + (l.stage || '') + '</span></td></tr>';
+              });
+              html += '</table>';
+              results.innerHTML = html;
+            })
+            .catch(function() {
+              results.innerHTML = '<div class="muted small">Search failed.</div>';
+            });
+        }, 250);
+      });
+    })();
+  </script>
 </body>
 </html>

@@ -290,6 +290,77 @@ check("response echoes the filters",
 check("endpoint targets at least the high T65 lead", j["processed"] >= 1)
 
 
+print("\n=== never_called + queue_only filters target priority dial pool only ===")
+
+# Fresh seed: one never-called + score-high + in-territory + T65, vs others
+# that fail various filters.
+with db.connect() as conn:
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("DELETE FROM scheduled_tasks")
+    conn.execute("DELETE FROM call_attempts")
+    conn.execute("DELETE FROM suppressions")
+    conn.execute("DELETE FROM person_notes")
+    conn.execute("DELETE FROM phone_numbers")
+    conn.execute("DELETE FROM people")
+    conn.execute("DELETE FROM oscr_ingestion_state WHERE key LIKE 'lookup_spend_%'")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+# (a) The ideal target
+ideal_pid, ideal_ph = seed_person_with_phone(name="Ideal Priority", city="Greensboro",
+                                              birthday="1962-03-04", lead_score=85,
+                                              source="T65_Dec_NC")
+# (b) Already-called T65 (should be EXCLUDED by never_called=True)
+called_pid, called_ph = seed_person_with_phone(name="Already Called", city="Greensboro",
+                                                birthday="1962-03-04", lead_score=85,
+                                                source="T65_Dec_NC")
+with db.connect() as conn:
+    conn.execute(
+        """INSERT INTO call_attempts(person_id, phone, agent, dialed_at, disposition,
+           disposition_category, dedupe_key) VALUES (?,?,?,?,?,?,?)""",
+        (called_pid, called_ph, "chris", now(), "no_answer", "no_answer", f"seed|{called_pid}"))
+# (c) Out-of-territory T65 (should be EXCLUDED by queue_only=True / geo)
+oot_pid, oot_ph = seed_person_with_phone(name="Out of Territory", city="Ararat",
+                                          birthday="1962-03-04", lead_score=85,
+                                          source="T65_Dec_VA")
+# (d) Wrong birth year (target_lead check)
+wrong_bday_pid, wrong_bday_ph = seed_person_with_phone(name="Wrong Year",
+                                                       city="Greensboro",
+                                                       birthday="1950-03-04",
+                                                       lead_score=85,
+                                                       source="T65_Dec_NC")
+# (e) Low score T65 (should be EXCLUDED by min_score)
+lowscore_pid, lowscore_ph = seed_person_with_phone(name="Low Score", city="Greensboro",
+                                                    birthday="1962-03-04", lead_score=40,
+                                                    source="T65_Dec_NC")
+
+with db.connect() as conn:
+    defaults = set(number_lookup._pending_phones(conn, limit=100))
+check("ideal target included", ideal_ph in defaults)
+check("already-called excluded", called_ph not in defaults)
+check("out-of-territory excluded by queue_only", oot_ph not in defaults)
+check("wrong birth-year excluded by queue_only", wrong_bday_ph not in defaults)
+check("low score excluded by min_score", lowscore_ph not in defaults)
+
+# Override never_called=False — the already-called lead reappears
+with db.connect() as conn:
+    no_nc = set(number_lookup._pending_phones(conn, limit=100, never_called=False))
+check("never_called=False brings the already-called lead back", called_ph in no_nc)
+
+# Override queue_only=False — the OOT lead reappears
+with db.connect() as conn:
+    no_qo = set(number_lookup._pending_phones(conn, limit=100, queue_only=False))
+check("queue_only=False brings the OOT lead back", oot_ph in no_qo)
+
+# Endpoint echoes the new filters
+import json as _json
+r = client.post("/agent/admin/number-lookup",
+                data=_json.dumps({"limit": 5, "never_called": True, "queue_only": True}),
+                content_type="application/json")
+j = r.get_json()
+check("endpoint echoes never_called", j["filters"].get("never_called") is True)
+check("endpoint echoes queue_only", j["filters"].get("queue_only") is True)
+
+
 passed = sum(1 for _, ok in results if ok)
 print(f"\n{'='*50}\n{passed}/{len(results)} PASSED" + ("  [OK] ALL GOOD" if passed == len(results) else "  *** FAILURES ***"))
 import sys

@@ -235,10 +235,22 @@ DEFAULT_DIALABLE_STAGES = ("new", "attempted", "voicemail", "callback")
 
 def _pending_phones(conn, limit: int, min_score: int = DEFAULT_MIN_SCORE,
                     source_patterns=None, owner: str = "",
-                    dialable_stages=DEFAULT_DIALABLE_STAGES) -> list:
-    """Return phones still needing classification, filtered by score / source /
-    owner / stage so a bulk pass only spends money on leads we actually plan to
-    call. Defaults: high-scoring T65 leads in the active dialing pool."""
+                    dialable_stages=DEFAULT_DIALABLE_STAGES,
+                    never_called: bool = True,
+                    queue_only: bool = True) -> list:
+    """Return phones worth classifying. Defaults are intentionally narrow:
+
+    * T65-source leads
+    * lead_score >= 70 (priority)
+    * stage in (new, attempted, voicemail, callback)
+    * never called before (zero call_attempts)
+    * passes the same geo whitelist + target-lead filter the dial queue uses
+
+    so the Telnyx \$ is spent only on the leads we're about to dial — not on
+    every random number that's ever entered the system.
+
+    Override never_called=False / queue_only=False to widen the net.
+    """
     source_patterns = source_patterns if source_patterns is not None else DEFAULT_SOURCE_PATTERNS
 
     where = [
@@ -255,8 +267,6 @@ def _pending_phones(conn, limit: int, min_score: int = DEFAULT_MIN_SCORE,
     if source_patterns:
         clauses = []
         for pattern in source_patterns:
-            # Allow callers to pass either 'T65_' (prefix) or 'OSCR' (exact-ish).
-            # A trailing % is appended unless the caller already escaped/anchored it.
             like = pattern if "%" in pattern else f"{pattern}%"
             clauses.append("p.source LIKE ?")
             params.append(like)
@@ -271,19 +281,47 @@ def _pending_phones(conn, limit: int, min_score: int = DEFAULT_MIN_SCORE,
         where.append(f"p.stage IN ({placeholders})")
         params.extend(dialable_stages)
 
-    # Person-scope suppression rules out DNC by stage, but a person-scope
-    # suppression entry can also exist independently — exclude them.
+    # Suppressions: hard exclude
     where.append("NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.scope='person' AND s.value=CAST(p.id AS TEXT))")
     where.append("NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.scope='phone' AND s.value=ph.e164)")
 
+    # Never-called: zero rows in call_attempts for this person AND this phone.
+    if never_called:
+        where.append("NOT EXISTS (SELECT 1 FROM call_attempts ca WHERE ca.person_id=p.id)")
+        where.append("NOT EXISTS (SELECT 1 FROM call_attempts ca WHERE ca.phone=ph.e164)")
+
     sql = (
-        "SELECT DISTINCT ph.e164 FROM phone_numbers ph "
+        "SELECT DISTINCT ph.e164, p.city, p.birthday FROM phone_numbers ph "
         "JOIN people p ON p.id=ph.person_id "
         f"WHERE {' AND '.join(where)} "
         "ORDER BY p.lead_score DESC, ph.id ASC LIMIT ?"
     )
-    params.append(int(limit))
-    return [r["e164"] for r in conn.execute(sql, params).fetchall()]
+    params.append(int(limit) * 2 if queue_only else int(limit))  # over-fetch then filter
+    rows = conn.execute(sql, params).fetchall()
+
+    if not queue_only:
+        return [r["e164"] for r in rows[:int(limit)]]
+
+    # Queue-only: enforce geo whitelist + target-lead (T65 birth year) the same
+    # way _build_ranked_queue does. These checks aren't pure SQL because
+    # geo_policy uses city normalization + aliases.
+    try:
+        import geo_policy
+        geo_on = geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True)
+    except Exception:
+        geo_policy = None  # type: ignore
+        geo_on = False
+
+    filtered = []
+    for row in rows:
+        if geo_on and geo_policy is not None and not geo_policy.city_is_allowed(row["city"]):
+            continue
+        if geo_policy is not None and not geo_policy.birthday_is_target(row["birthday"]):
+            continue
+        filtered.append(row["e164"])
+        if len(filtered) >= int(limit):
+            break
+    return filtered
 
 
 def lookup_pending(limit: Optional[int] = None,
@@ -292,7 +330,9 @@ def lookup_pending(limit: Optional[int] = None,
                    min_score: Optional[int] = None,
                    source_patterns: Optional[list] = None,
                    owner: str = "",
-                   dialable_stages: Optional[tuple] = None) -> dict:
+                   dialable_stages: Optional[tuple] = None,
+                   never_called: bool = True,
+                   queue_only: bool = True) -> dict:
     """Find phones worth classifying and look them up.
 
     DEFAULTS ARE COST-CONSERVATIVE: only T65-source leads with lead_score >= 70
@@ -324,6 +364,8 @@ def lookup_pending(limit: Optional[int] = None,
             "source_patterns": list(source_patterns),
             "owner": owner,
             "dialable_stages": list(dialable_stages),
+            "never_called": bool(never_called),
+            "queue_only": bool(queue_only),
             "budget_usd": budget,
             "limit": limit,
         },
@@ -336,7 +378,9 @@ def lookup_pending(limit: Optional[int] = None,
     with db.connect() as conn:
         phones = _pending_phones(conn, limit, min_score=min_score,
                                  source_patterns=source_patterns, owner=owner,
-                                 dialable_stages=dialable_stages)
+                                 dialable_stages=dialable_stages,
+                                 never_called=never_called,
+                                 queue_only=queue_only)
         summary["requested"] = len(phones)
         spend = _today_spend(conn)
         if spend >= budget:

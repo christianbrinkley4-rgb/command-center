@@ -1199,6 +1199,57 @@ def today_view():
     queue = _build_ranked_queue(owner=owner, limit=10)
 
     with db.connect() as conn:
+        # 7-day trend: calls, connects, voicemails, appointments per day
+        week_rows = conn.execute(
+            """SELECT substr(dialed_at,1,10) d,
+                      COUNT(*) total,
+                      SUM(CASE WHEN disposition_category='live_conversation' THEN 1 ELSE 0 END) connects,
+                      SUM(CASE WHEN disposition_category='voicemail' THEN 1 ELSE 0 END) voicemails,
+                      SUM(CASE WHEN disposition_category='bad_number' THEN 1 ELSE 0 END) bad
+               FROM call_attempts
+               WHERE date(dialed_at) >= date(?, '-7 days')
+               GROUP BY substr(dialed_at,1,10)
+               ORDER BY d""",
+            (today_iso,),
+        ).fetchall()
+        week_appts = {
+            r["d"]: r["n"] for r in conn.execute(
+                """SELECT substr(created_at,1,10) d, COUNT(*) n FROM appointments
+                   WHERE date(created_at) >= date(?, '-7 days')
+                   GROUP BY substr(created_at,1,10)""",
+                (today_iso,),
+            )
+        }
+        seven_day_trend = []
+        for r in week_rows:
+            d = r["d"]
+            seven_day_trend.append({
+                "date": d,
+                "total": r["total"], "connects": r["connects"],
+                "voicemails": r["voicemails"], "bad": r["bad"],
+                "appointments": week_appts.get(d, 0),
+                "connect_pct": round(100.0 * r["connects"] / r["total"], 1) if r["total"] else 0.0,
+            })
+
+        # System health: queue depth, pending tasks, last call
+        sys_health = {
+            "queue_depth": len(queue),
+            "pending_tasks_total": conn.execute(
+                "SELECT COUNT(*) n FROM scheduled_tasks WHERE status='pending'").fetchone()["n"],
+            "pending_tasks_due_today": conn.execute(
+                "SELECT COUNT(*) n FROM scheduled_tasks WHERE status='pending' AND date(due_at) <= date(?)",
+                (today_iso,)).fetchone()["n"],
+            "last_call_at": (conn.execute(
+                "SELECT MAX(dialed_at) m FROM call_attempts").fetchone()["m"] or "—"),
+            "last_import_at": (conn.execute(
+                "SELECT MAX(first_seen_at) m FROM people").fetchone()["m"] or "—"),
+            "leads_never_called": conn.execute(
+                """SELECT COUNT(*) n FROM people p
+                   WHERE p.stage='new'
+                     AND NOT EXISTS (SELECT 1 FROM call_attempts c WHERE c.person_id=p.id)"""
+            ).fetchone()["n"],
+        }
+
         today_calls = conn.execute(
             """SELECT c.id, c.dialed_at, c.disposition, c.disposition_category,
                       c.agent, c.phone, c.live_talk_seconds,
@@ -1272,7 +1323,48 @@ def today_view():
         warnings=warnings,
         reference_numbers=_reference_numbers(),
         tpmo_disclaimer=CMS_TPMO_DISCLAIMER,
+        seven_day_trend=seven_day_trend,
+        system_health=sys_health,
     )
+
+
+# ----------------------------- /today lead search (JSON) -----------------------------
+
+@app.route("/api/today/search")
+def today_search():
+    """Lightweight search the /today page uses for the drill-in widget.
+    Accepts q=<phone digits or name fragment>, returns minimal lead cards."""
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"count": 0, "leads": []})
+    digits = "".join(ch for ch in q if ch.isdigit())
+    with db.connect() as conn:
+        results = []
+        if digits and len(digits) >= 4:
+            tail = digits[-10:]
+            rows = conn.execute(
+                """SELECT DISTINCT p.id, p.full_name, p.city, p.stage, p.lead_score,
+                                   p.source, ph.e164 phone
+                   FROM phone_numbers ph JOIN people p ON p.id=ph.person_id
+                   WHERE REPLACE(REPLACE(REPLACE(ph.e164,'+',''),'-',''),' ','') LIKE ?
+                   ORDER BY p.lead_score DESC, p.last_activity_at DESC LIMIT 15""",
+                (f"%{tail}%",),
+            ).fetchall()
+            results.extend(dict(r) for r in rows)
+        if len(results) < 15:
+            rows = conn.execute(
+                """SELECT p.id, p.full_name, p.city, p.stage, p.lead_score, p.source,
+                          (SELECT e164 FROM phone_numbers x WHERE x.person_id=p.id LIMIT 1) phone
+                   FROM people p WHERE lower(p.full_name) LIKE ?
+                   ORDER BY p.lead_score DESC, p.last_activity_at DESC LIMIT ?""",
+                (f"%{q.lower()}%", 15 - len(results)),
+            ).fetchall()
+            seen = {r["id"] for r in results}
+            for r in rows:
+                d = dict(r)
+                if d["id"] not in seen:
+                    results.append(d)
+    return jsonify({"count": len(results), "leads": results})
 
 
 # ----------------------------- background sync -----------------------------

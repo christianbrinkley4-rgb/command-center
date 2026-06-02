@@ -1102,6 +1102,8 @@ def admin_number_lookup():
         source_patterns=source_patterns,
         owner=(d.get("owner") or "").strip(),
         dialable_stages=tuple(dialable) if dialable else None,
+        never_called=bool(d.get("never_called", True)),
+        queue_only=bool(d.get("queue_only", True)),
     )
     return jsonify({"ok": True, **summary})
 
