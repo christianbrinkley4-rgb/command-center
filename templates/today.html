@@ -102,13 +102,14 @@
           <h2>Next 10 in the dial order</h2>
           {% if queue %}
             <table>
-              <tr><th>#</th><th>Tier</th><th>Name</th><th>City</th><th>Source</th><th class="right">Score</th></tr>
+              <tr><th>#</th><th>Tier</th><th>Name</th><th>City</th><th>T65 Month</th><th>Source</th><th class="right">Score</th></tr>
               {% for row in queue %}
                 <tr>
                   <td class="muted">{{ loop.index }}</td>
                   <td><span class="pill {{ row.Queue_Type }}">{{ row.Queue_Type }}</span></td>
                   <td>{{ row.Name or '&mdash;'|safe }}</td>
                   <td>{{ row.City or '' }}</td>
+                  <td>{{ row.T65_Month or '' }}</td>
                   <td class="small muted">{{ row.Source or '' }}</td>
                   <td class="right"><span class="score {{ 'high' if (row.Lead_Score or 0) >= 70 else 'low' }}">{{ row.Lead_Score or '-' }}</span></td>
                 </tr>

@@ -228,6 +228,7 @@ def api_action_queue():
         call_next.append({
             "id": r["person_id"], "full_name": r["Name"], "city": r["City"], "county": r["County"],
             "phone": r["Phone"], "source": r["Source"], "lead_score": r["Lead_Score"],
+            "t65_month": r.get("T65_Month", ""),
             "stage": r["Queue_Type"], "age": _age(r["Birthday"]),
             "attempt_count": r.get("Attempt_Count", 0),
             "attempts_remaining": r.get("Attempts_Remaining", 0),
@@ -761,6 +762,93 @@ def _city_in_whitelist(city):
     return geo_policy.city_is_allowed(city)
 
 
+# ---- Time-of-day premium-lead reservation -----------------------------------
+# Hold high-value, never-touched leads for the research-backed, senior-friendly
+# calling windows (Eastern). OUTSIDE those windows premium leads sink to the bottom
+# of the queue so the dialer works lower-value / retry leads first; INSIDE a window
+# they keep their natural top ranking. The dialer re-pulls the queue every ~12s, so
+# leads auto-rise the moment a window opens. Soft by design — premium leads are only
+# reordered, never removed, so the dialer never idles. Turn off with
+# CC_PREMIUM_RESERVE_ENABLED=0.
+def _premium_reserve_enabled():
+    # Opt-in (default OFF) so existing ranking/tests are unchanged until the operator
+    # sets CC_PREMIUM_RESERVE_ENABLED=1 on the droplet.
+    return str(os.getenv("CC_PREMIUM_RESERVE_ENABLED", "0")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _premium_min_score():
+    try:
+        return int(os.getenv("CC_PREMIUM_MIN_SCORE", "70"))
+    except Exception:
+        return 70
+
+
+def _premium_windows():
+    """Comma-separated 'startHour-endHour' 24h Eastern ranges. Default = the three
+    research-backed T65 windows: 10-12, 2-4, 5-8pm."""
+    out = []
+    for part in str(os.getenv("CC_PREMIUM_WINDOWS", "10-12,14-16,17-20") or "").split(","):
+        a, _, b = part.strip().partition("-")
+        try:
+            out.append((int(a), int(b)))
+        except Exception:
+            pass
+    return out
+
+
+def _eastern_hour():
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).hour
+    except Exception:
+        return datetime.now().hour  # fallback: rely on host clock
+
+
+def _in_premium_window():
+    h = _eastern_hour()
+    return any(start <= h < end for start, end in _premium_windows())
+
+
+def _is_premium_lead(row):
+    # Never-touched, fresh, high-scoring leads are the ones worth saving for the best
+    # windows (hot_fresh = stage 'new' AND first seen <24h).
+    return row.get("Queue_Type") == "hot_fresh" and (row.get("Lead_Score") or 0) >= _premium_min_score()
+
+
+def _apply_premium_window(rows):
+    """Outside every premium window, push premium leads to the bottom (order preserved)
+    so the dialer works other leads first. Inside a window (or disabled / no windows
+    configured), return the order unchanged."""
+    if not rows or not _premium_reserve_enabled() or _in_premium_window():
+        return rows
+    premium = [r for r in rows if _is_premium_lead(r)]
+    if not premium:
+        return rows
+    rest = [r for r in rows if not _is_premium_lead(r)]
+    return rest + premium
+
+
+_MONTH_NAMES = ("", "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December")
+
+
+def _t65_month(source, birthday):
+    """For T65 birthday-list leads, the birthday month name so the lead order shows
+    which T65 cohort each lead belongs to (March vs November, etc.). Blank for
+    non-T65 leads (final expense / web / MedSup / callbacks)."""
+    if not str(source or "").upper().startswith("T65"):
+        return ""
+    b = str(birthday or "").strip()
+    mo = None
+    if "/" in b:                       # MM/DD/YYYY
+        head = b.split("/")[0]
+        mo = int(head) if head.isdigit() else None
+    elif "-" in b and len(b) >= 7:     # YYYY-MM-DD
+        parts = b.split("-")
+        mo = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+    return _MONTH_NAMES[mo] if mo and 1 <= mo <= 12 else ""
+
+
 AGENDA_SCHEMA = """
 CREATE TABLE IF NOT EXISTS agenda_settings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -931,6 +1019,7 @@ def _build_ranked_queue(owner="", limit=5000, agenda_date=None, city_filter=None
                            "Attempts_Remaining": status["attempts_remaining"],
                            "Agenda_Date": agenda_day.isoformat(),
                            "Source": r["source"] or "",
+                           "T65_Month": _t65_month(r["source"], r["birthday"]),
                            "Lead_Score": r["lead_score"], "person_id": pid,
                            "_drive": _drive_minutes(r["city"])})
 
@@ -961,6 +1050,8 @@ def _build_ranked_queue(owner="", limit=5000, agenda_date=None, city_filter=None
         # strip internal sort key from the response
         for x in rows:
             x.pop("_drive", None)
+    # Time-of-day: outside the good windows, hold premium leads for later (soft).
+    rows = _apply_premium_window(rows)
     return rows[:limit]
 
 
