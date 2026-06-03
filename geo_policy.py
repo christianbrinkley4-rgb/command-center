@@ -103,13 +103,18 @@ def filter_enabled(env_name="CC_GEO_FILTER_ENABLED", default=True):
 
 
 def target_birth_years():
-    raw = os.getenv("CC_TARGET_BIRTH_YEARS", "1962")
+    # Cohorts we actively work:
+    #   1961 -> genuine T65 turning 65 in 2026 (OSCR monthly birthday lists, e.g. T65_Nov_NC)
+    #   1962 -> the original Dialer_Existing list + next year's T65
+    # Override per-deployment with CC_TARGET_BIRTH_YEARS (comma-separated). As OSCR
+    # rolls into new birth-year cohorts, add the year here or via the env var.
+    raw = os.getenv("CC_TARGET_BIRTH_YEARS", "1961,1962")
     years = set()
     for part in str(raw or "").split(","):
         part = part.strip()
         if part.isdigit() and len(part) == 4:
             years.add(int(part))
-    return years or {1962}
+    return years or {1961, 1962}
 
 
 def birth_year(birthday):
