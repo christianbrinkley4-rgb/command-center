@@ -20,6 +20,8 @@
   </div>
   <nav class="tabs">
     <button class="tab active" data-view="today">Today</button>
+    <button class="tab" data-view="dialer">Dialer</button>
+    <button class="tab" data-view="auto-dial">Auto Dial</button>
     <button class="tab" data-view="pipeline">Pipeline</button>
     <button class="tab" data-view="automations">Automations</button>
     <button class="tab" data-view="messages">Messages</button>
@@ -81,6 +83,106 @@
       <div class="queue-col queue-col-wide">
         <div class="queue-head"><span class="qh-dot c-call"></span><h3>Call Next — Best Leads</h3><span class="qh-count" id="cnCount">0</span></div>
         <div class="queue-list" id="callNextList"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PERSONAL PHONE DIALER ============ -->
+  <section id="view-dialer" class="view hidden">
+    <div class="auto-banner">
+      <div class="auto-pulse"></div>
+      <div>
+        <div class="auto-title">Personal Phone Dialer</div>
+        <div class="auto-desc">Paste a list, start the run, and Phone Link will handle each call through your paired phone. You stay in control: record the result before the next number is dialed.</div>
+      </div>
+      <span class="msg-badge preview">Phone Link</span>
+    </div>
+    <div class="dialer-grid">
+      <div class="panel">
+        <div class="panel-head"><h3>1. Choose the queue</h3><span class="muted">uses your ranked leads</span></div>
+        <label class="dialer-filter"><span>Date</span><input type="date" id="dialerDate"></label>
+        <label class="dialer-filter"><span>City filter</span><input type="text" id="dialerCity" placeholder="All eligible cities"></label>
+        <div class="dialer-options">
+          <label><span>Agent</span><select id="dialerAgent"><option value="chris">Chris</option><option value="will">Will</option></select></label>
+          <button class="btn btn-primary" id="dialerLoadBtn">Load filtered queue</button>
+        </div>
+        <div class="muted" id="dialerImportHint">This uses the same eligibility, DNC, city, and ranking rules as Today → Call Agenda.</div>
+      </div>
+      <div class="panel dialer-active">
+        <div class="panel-head"><h3>2. Work the queue</h3><span class="muted" id="dialerProgress">No list loaded</span></div>
+        <div id="dialerEmpty" class="empty"><div class="empty-t">Ready when you are</div><div class="empty-s">Load a list to begin.</div></div>
+        <div id="dialerWork" class="hidden">
+          <div class="dialer-lead" id="dialerLead"></div>
+          <div class="dialer-number" id="dialerNumber"></div>
+          <div class="dialer-status" id="dialerStatus"></div>
+          <a class="btn btn-primary dialer-call" id="dialerCallBtn" href="#">☎ Call with Phone Link</a>
+          <label class="modal-label" for="dialerDisposition">Call result</label>
+          <select id="dialerDisposition" class="dialer-select">
+            <option value="">Choose a result…</option>
+            <option value="human_transferred">Spoke with person</option>
+            <option value="callback_requested">Callback requested</option>
+            <option value="appointment_set">Appointment set</option>
+            <option value="not_interested">Not interested</option>
+            <option value="voicemail_dropped">Voicemail</option>
+            <option value="no_answer">No answer / busy</option>
+            <option value="do_not_call">Do not call</option>
+            <option value="dead_number">Bad number</option>
+            <option value="other">Other</option>
+          </select>
+          <textarea id="dialerNote" class="dialer-note" rows="3" placeholder="Optional note about this call"></textarea>
+          <button class="btn btn-primary" id="dialerNextBtn">Save result &amp; call next →</button>
+          <div class="muted dialer-help">Tip: the Call button opens Phone Link. Return here after hanging up, choose a result, then press the next button.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ AUTO DIAL ============ -->
+  <section id="view-auto-dial" class="view hidden">
+    <div class="auto-banner">
+      <div class="auto-pulse"></div>
+      <div>
+        <div class="auto-title">Auto Dial</div>
+        <div class="auto-desc">Press Go once. Each call opens in Phone Link; after you choose a disposition, the next lead is called automatically.</div>
+      </div>
+      <span class="msg-badge preview">Phone Link</span>
+    </div>
+    <div class="dialer-grid">
+      <div class="panel">
+        <div class="panel-head"><h3>Run filters</h3><span class="muted">same ranked queue as Today</span></div>
+        <label class="dialer-filter"><span>Date</span><input type="date" id="autoDialDate"></label>
+        <label class="dialer-filter"><span>City filter</span><input type="text" id="autoDialCity" placeholder="All eligible cities"></label>
+        <div class="dialer-options">
+          <label><span>Agent</span><select id="autoDialAgent"><option value="chris">Chris</option><option value="will">Will</option></select></label>
+          <button class="btn btn-primary" id="autoDialGoBtn">▶ Go</button>
+          <button class="btn btn-soft" id="autoDialStopBtn">Stop</button>
+        </div>
+        <div class="muted" id="autoDialState">Stopped. Choose filters and press Go.</div>
+      </div>
+      <div class="panel dialer-active">
+        <div class="panel-head"><h3>Current lead</h3><span class="muted" id="autoDialProgress">No run active</span></div>
+        <div id="autoDialEmpty" class="empty"><div class="empty-t">Ready when you are</div><div class="empty-s">Go starts with the first eligible lead.</div></div>
+        <div id="autoDialWork" class="hidden">
+          <div class="dialer-lead" id="autoDialLead"></div>
+          <div class="dialer-number" id="autoDialNumber"></div>
+          <div class="dialer-status" id="autoDialStatus"></div>
+          <div class="dialer-disposition-label">Disposition before the next call</div>
+          <select id="autoDialDisposition" class="dialer-select">
+            <option value="">Choose a result…</option>
+            <option value="human_transferred">Spoke with person</option>
+            <option value="callback_requested">Callback requested</option>
+            <option value="appointment_set">Appointment set</option>
+            <option value="not_interested">Not interested</option>
+            <option value="voicemail_dropped">Voicemail</option>
+            <option value="no_answer">No answer / busy</option>
+            <option value="do_not_call">Do not call</option>
+            <option value="dead_number">Bad number</option>
+            <option value="other">Other</option>
+          </select>
+          <textarea id="autoDialNote" class="dialer-note" rows="3" placeholder="Optional note about this call"></textarea>
+          <button class="btn btn-primary" id="autoDialDispositionBtn">Save disposition &amp; call next →</button>
+          <div class="muted dialer-help">The next call starts as soon as the result is saved.</div>
+        </div>
       </div>
     </div>
   </section>

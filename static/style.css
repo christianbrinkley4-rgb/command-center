@@ -232,6 +232,25 @@ main{padding:24px 26px 60px;max-width:1480px;margin:0 auto}
 .empty-t{font-weight:700;color:var(--txt);font-size:14px}
 .empty-s{font-size:12.5px;color:var(--muted);margin-top:5px}
 
+/* ---------- personal phone dialer ---------- */
+.dialer-grid{display:grid;grid-template-columns:1fr 1.25fr;gap:14px}
+.dialer-input,.dialer-note,.dialer-select{width:100%;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;color:var(--txt);padding:12px;font:inherit;resize:vertical}
+.dialer-input:focus,.dialer-note:focus,.dialer-select:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.12)}
+.dialer-filter{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:700;margin-bottom:11px}
+.dialer-filter input{background:var(--bg2);border:1px solid var(--border2);border-radius:9px;color:var(--txt);padding:10px;font:inherit;text-transform:none}
+.dialer-options{display:flex;align-items:end;gap:10px;margin-top:13px}
+.dialer-options label{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:700}
+.dialer-options select{background:var(--bg2);border:1px solid var(--border2);border-radius:9px;color:var(--txt);padding:10px}
+.dialer-import-hint{margin-top:10px}
+.dialer-number{font-size:38px;font-weight:800;letter-spacing:.02em;color:var(--cyan);text-align:center;padding:28px 10px 8px}
+.dialer-lead{text-align:center;color:var(--txt);font-size:18px;font-weight:700;margin-top:20px}
+.dialer-status{text-align:center;color:var(--muted);margin-bottom:18px}
+.dialer-call{display:block;text-align:center;text-decoration:none;margin-bottom:18px}
+.dialer-select{margin:0 0 10px}
+.dialer-note{margin-bottom:12px}
+.dialer-help{margin-top:12px;text-align:center}
+@media(max-width:900px){.dialer-grid{grid-template-columns:1fr}}
+
 @media(max-width:1200px){.hero-strip{grid-template-columns:1fr}.hero-mini{grid-template-columns:repeat(3,1fr)}.agenda-bar{align-items:stretch;flex-wrap:wrap}.agenda-field,.agenda-city input{width:100%}.queue-grid{grid-template-columns:1fr}.queue-col{max-height:none}}
 
 

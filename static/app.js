@@ -604,7 +604,125 @@ $("#apptSave").onclick = async () => {
 };
 
 /* ---------------- keyboard shortcuts ---------------- */
-const VIEW_KEYS = { "1": "today", "2": "pipeline", "3": "automations", "4": "messages", "5": "analytics", "6": "leads" };
+const VIEW_KEYS = { "1": "today", "2": "dialer", "3": "auto-dial", "4": "pipeline", "5": "automations", "6": "messages", "7": "analytics", "8": "leads" };
+let dialerRun = { leads: [], index: 0 };
+let autoDialRun = { leads: [], index: 0, active: false };
+function dialerRender() {
+  const total = dialerRun.leads.length, i = dialerRun.index;
+  $("#dialerProgress").textContent = total ? `${Math.min(i + 1, total)} of ${total}` : "No list loaded";
+  $("#dialerEmpty").classList.toggle("hidden", !!total && i < total);
+  $("#dialerWork").classList.toggle("hidden", !(total && i < total));
+  if (!total || i >= total) return;
+  const lead = dialerRun.leads[i], number = lead.phone;
+  $("#dialerLead").textContent = [lead.full_name, lead.city].filter(Boolean).join(" · ");
+  $("#dialerNumber").textContent = number;
+  $("#dialerStatus").textContent = i === 0 ? "First number in this run" : "Ready for the next call";
+  $("#dialerCallBtn").href = "tel:" + encodeURIComponent(number);
+  $("#dialerDisposition").value = "";
+  $("#dialerNote").value = "";
+}
+async function dialerLoad() {
+  const p = new URLSearchParams();
+  p.set("date", $("#dialerDate").value || localDateISO());
+  if ($("#dialerCity").value.trim()) p.set("city", $("#dialerCity").value.trim());
+  if ($("#dialerAgent").value) p.set("owner", $("#dialerAgent").value);
+  const r = await (await fetch("/api/action-queue?" + p.toString())).json();
+  const leads = (r.call_next || []).filter(x => x.phone);
+  if (!leads.length) { toast("No eligible leads match those filters", "err"); return; }
+  dialerRun = { leads, index: 0 };
+  dialerRender();
+  toast(`${leads.length} ranked leads loaded`);
+}
+async function dialerNext() {
+  const disposition = $("#dialerDisposition").value;
+  if (!disposition) { toast("Choose the call result first", "err"); return; }
+  const number = dialerRun.leads[dialerRun.index].phone;
+  const r = await fetch("/api/manual-call", { method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ phone: number, disposition, note: $("#dialerNote").value, agent: $("#dialerAgent").value }) });
+  const result = await r.json();
+  if (!r.ok) { toast(result.error || "Could not save call", "err"); return; }
+  dialerRun.index++;
+  dialerRender();
+  toast(dialerRun.index >= dialerRun.leads.length ? "Run complete" : "Saved — next number ready");
+}
+$("#dialerLoadBtn").onclick = dialerLoad;
+$("#dialerNextBtn").onclick = dialerNext;
+$("#dialerDate").value = localDateISO();
+
+function autoDialRender() {
+  const total = autoDialRun.leads.length, i = autoDialRun.index;
+  const active = autoDialRun.active && i < total;
+  $("#autoDialProgress").textContent = total ? `${Math.min(i + 1, total)} of ${total}` : "No run active";
+  $("#autoDialEmpty").classList.toggle("hidden", active);
+  $("#autoDialWork").classList.toggle("hidden", !active);
+  if (!active) return;
+  const lead = autoDialRun.leads[i];
+  $("#autoDialLead").textContent = [lead.full_name, lead.city].filter(Boolean).join(" · ");
+  $("#autoDialNumber").textContent = lead.phone;
+  $("#autoDialStatus").textContent = i === 0 ? "First lead ready — press Go started this run" : "Saved — next lead is ready";
+  $("#autoDialDisposition").value = "";
+  $("#autoDialNote").value = "";
+}
+
+function autoDialOpenCurrent() {
+  if (!autoDialRun.active || autoDialRun.index >= autoDialRun.leads.length) return;
+  const number = autoDialRun.leads[autoDialRun.index].phone;
+  $("#autoDialState").textContent = "Calling " + number + " through Phone Link…";
+  window.location.href = "tel:" + encodeURIComponent(number);
+}
+
+async function autoDialGo() {
+  const p = new URLSearchParams();
+  p.set("date", $("#autoDialDate").value || localDateISO());
+  if ($("#autoDialCity").value.trim()) p.set("city", $("#autoDialCity").value.trim());
+  if ($("#autoDialAgent").value) p.set("owner", $("#autoDialAgent").value);
+  $("#autoDialState").textContent = "Loading filtered queue…";
+  const r = await (await fetch("/api/action-queue?" + p.toString())).json();
+  const leads = (r.call_next || []).filter(x => x.phone);
+  if (!leads.length) {
+    autoDialRun = { leads: [], index: 0, active: false };
+    autoDialRender();
+    $("#autoDialState").textContent = "No eligible leads match those filters.";
+    toast("No eligible leads match those filters", "err");
+    return;
+  }
+  autoDialRun = { leads, index: 0, active: true };
+  autoDialRender();
+  toast(`${leads.length} leads loaded — starting first call`);
+  autoDialOpenCurrent();
+}
+
+function autoDialStop() {
+  autoDialRun.active = false;
+  $("#autoDialState").textContent = "Stopped. No more calls will start.";
+  autoDialRender();
+}
+
+async function autoDialSaveAndNext() {
+  if (!autoDialRun.active) return;
+  const disposition = $("#autoDialDisposition").value;
+  if (!disposition) { toast("Choose the call result first", "err"); return; }
+  const lead = autoDialRun.leads[autoDialRun.index];
+  const r = await fetch("/api/manual-call", { method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ phone: lead.phone, disposition, note: $("#autoDialNote").value, agent: $("#autoDialAgent").value }) });
+  const result = await r.json();
+  if (!r.ok) { toast(result.error || "Could not save call", "err"); return; }
+  autoDialRun.index++;
+  if (autoDialRun.index >= autoDialRun.leads.length) {
+    autoDialRun.active = false;
+    $("#autoDialState").textContent = "Run complete.";
+    autoDialRender();
+    toast("Auto Dial run complete");
+    return;
+  }
+  autoDialRender();
+  autoDialOpenCurrent();
+}
+
+$("#autoDialDate").value = localDateISO();
+$("#autoDialGoBtn").onclick = autoDialGo;
+$("#autoDialStopBtn").onclick = autoDialStop;
+$("#autoDialDispositionBtn").onclick = autoDialSaveAndNext;
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") { $("#apptModal").classList.add("hidden"); return; }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);

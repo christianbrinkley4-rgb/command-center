@@ -502,6 +502,48 @@ def api_set_stage(pid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/manual-call", methods=["POST"])
+def api_manual_call():
+    """Record a call made through the personal-phone dialer.
+
+    The phone list may contain numbers that are not yet leads, so person_id is
+    intentionally nullable. Matching numbers are attached to their lead.
+    """
+    data = request.json or {}
+    phone = db.normalize_phone(data.get("phone"))
+    disposition = (data.get("disposition") or "").strip().lower()
+    allowed = {"human_transferred", "callback_requested", "appointment_set",
+               "not_interested", "voicemail_dropped", "no_answer",
+               "do_not_call", "dead_number", "other"}
+    if not phone or disposition not in allowed:
+        return jsonify({"error": "phone and valid disposition are required"}), 400
+    now = datetime.now().isoformat(timespec="seconds")
+    agent = (data.get("agent") or "chris").strip().lower()
+    note = (data.get("note") or "").strip()
+    with db.connect() as conn:
+        match = conn.execute("SELECT person_id FROM phone_numbers WHERE e164=?", (phone,)).fetchone()
+        person_id = match["person_id"] if match else None
+        category = db.disposition_category(disposition)
+        conn.execute("""INSERT INTO call_attempts
+            (person_id, phone, agent, dialed_at, disposition, disposition_category, dedupe_key)
+            VALUES (?,?,?,?,?,?,?)""",
+            (person_id, phone, agent, now, disposition, category,
+             f"manual:{phone}:{now}"))
+        if person_id:
+            conn.execute("UPDATE people SET stage=?, last_activity_at=? WHERE id=?",
+                         ({"callback_requested": "callback", "appointment_set": "appointment",
+                           "human_transferred": "contacted", "do_not_call": "dnc"}.get(disposition, "attempted"),
+                          now, person_id))
+            if disposition == "do_not_call":
+                conn.execute("INSERT OR IGNORE INTO suppressions(scope,value,reason,created_at) VALUES ('phone',?,'dnc',?)",
+                             (phone, now))
+            if note:
+                conn.execute("INSERT INTO person_notes(person_id,body,author,created_at) VALUES (?,?,?,?)",
+                             (person_id, note, "manual-dialer", now))
+        db.audit(conn, "manual_call", phone, "call_logged", disposition, agent)
+    return jsonify({"ok": True, "person_id": person_id, "phone": phone})
+
+
 @app.route("/api/leads/bulk", methods=["POST"])
 def api_bulk():
     """Bulk action on selected leads from the Lead Book: assign owner, set DNC, or
