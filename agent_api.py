@@ -35,15 +35,6 @@ agent_api = Blueprint("agent_api", __name__)
 
 AGENT_TOKEN = os.getenv("CC_AGENT_TOKEN", "")
 VALID_STAGES = {"new", "attempted", "voicemail", "contacted", "callback", "appointment", "dnc"}
-DNC_VALUES = {"DNC", "DO NOT CALL", "DONOTCALL", "DO-NOT-CALL", "DO NOT CONTACT", "OPT OUT", "OPTOUT", "STOP"}
-DNC_NO_VALUES = {"", "NO", "N", "FALSE", "0"}
-DNC_FIELD_NAMES = {"dnc", "do not call", "donotcall", "do not contact", "opt out", "optout"}
-PHONE_FIELD_NAMES = {
-    "phone", "phone number", "phonet", "homephone", "home phone",
-    "mobile", "cell", "cell phone", "number", "telephone", "work phone",
-}
-
-
 # ------------------------------------------------------------------ auth
 
 @agent_api.before_request
@@ -71,24 +62,7 @@ def _field_name(key):
 
 
 def _lead_phones(lead):
-    phone_fields = {p.replace(" ", "") for p in PHONE_FIELD_NAMES}
-    phones, seen = [], set()
-    for key, value in (lead or {}).items():
-        name = _field_name(key)
-        compact = name.replace(" ", "")
-        if (
-            name in PHONE_FIELD_NAMES
-            or compact in phone_fields
-            or "phone" in compact
-            or "mobile" in compact
-            or "cell" in compact
-            or "telephone" in compact
-        ):
-            phone = db.normalize_phone(value)
-            if phone and phone not in seen:
-                phones.append(phone)
-                seen.add(phone)
-    return phones
+    return db.lead_phones(lead)
 
 
 def _lead_value(lead, *names):
@@ -97,17 +71,6 @@ def _lead_value(lead, *names):
         if _field_name(key) in wanted:
             return _clean(value)
     return ""
-
-
-def _lead_is_dnc(lead):
-    for key, value in (lead or {}).items():
-        name = _field_name(key)
-        text = _clean(value).upper()
-        if text in DNC_VALUES:
-            return True
-        if name in DNC_FIELD_NAMES and text not in DNC_NO_VALUES:
-            return True
-    return False
 
 
 # ------------------------------------------------------------------ discovery
@@ -266,25 +229,12 @@ def leads_import():
             phones = _lead_phones(lead)
             phone = phones[0] if phones else ""
 
-            if _lead_is_dnc(lead):
-                for p in phones:
-                    conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
-                                 (p, "oscr_dnc", _now()))
-                suppressed += 1
-                continue
             if birthday and not geo_policy.birthday_is_target(birthday):
                 ineligible_age += 1
                 continue
 
             key = db.person_key(name, city, birthday) or (f"phone|{phone}" if phone else "")
             if not key:
-                continue
-
-            # Never resurrect an opted-out / DNC person from a freshly pulled list.
-            if phones and any(conn.execute(
-                    "SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (p,)).fetchone()
-                    for p in phones):
-                suppressed += 1
                 continue
 
             row = conn.execute("SELECT id FROM people WHERE person_key=?", (key,)).fetchone()
@@ -365,26 +315,17 @@ def call_queue():
     fetch_limit = min(limit * 5, 5000) if geo_policy.filter_enabled("CC_GEO_FILTER_ENABLED", default=True) else limit
     owner = _clean(request.args.get("owner"))
     min_score = request.args.get("min_score")
-    where = ["stage IN ('new','attempted','voicemail','callback')"]
+    where = ["stage IN ('new','attempted','voicemail','callback','dnc')", "ph.status<>'bad'"]
     params = []
     if owner:
         where.append("owner=?"); params.append(owner)
     if min_score:
         where.append("lead_score>=?"); params.append(int(min_score))
-    where.append("NOT EXISTS (SELECT 1 FROM suppressions sp WHERE sp.scope='person' AND sp.value=CAST(p.id AS TEXT))")
-    where.append("""EXISTS (
-        SELECT 1 FROM phone_numbers ph
-        WHERE ph.person_id=p.id AND ph.status='active'
-          AND NOT EXISTS (SELECT 1 FROM suppressions ss WHERE ss.scope='phone' AND ss.value=ph.e164)
-    )""")
     with db.connect() as conn:
         rows = conn.execute(f"""
             SELECT p.id, p.full_name, p.city, p.county, p.birthday, p.source, p.owner,
                    p.lead_score, p.stage, p.last_activity_at,
-                   (SELECT e164 FROM phone_numbers x
-                    WHERE x.person_id=p.id AND x.status='active'
-                      AND NOT EXISTS (SELECT 1 FROM suppressions ss WHERE ss.scope='phone' AND ss.value=x.e164)
-                    LIMIT 1) phone,
+                   ph.e164 phone,
                    (SELECT COUNT(*) FROM call_attempts c WHERE c.person_id=p.id) call_count,
                    (SELECT disposition FROM call_attempts c WHERE c.person_id=p.id
                     ORDER BY dialed_at DESC LIMIT 1) last_disposition,
@@ -392,9 +333,9 @@ def call_queue():
                     ORDER BY dialed_at DESC LIMIT 1) last_outcome,
                    (SELECT dialed_at FROM call_attempts c WHERE c.person_id=p.id
                     ORDER BY dialed_at DESC LIMIT 1) last_call_time
-            FROM people p
+            FROM people p JOIN phone_numbers ph ON ph.person_id=p.id
             WHERE {' AND '.join(where)}
-            ORDER BY (stage='callback') DESC, lead_score DESC, last_activity_at ASC
+            ORDER BY (stage='callback') DESC, lead_score DESC, last_activity_at ASC, p.id, ph.id
             LIMIT ?""", params + [fetch_limit]).fetchall()
         leads = []
         today = queue_policy.coerce_day()

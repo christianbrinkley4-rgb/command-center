@@ -62,24 +62,24 @@ payload = [
     },
 ]
 counts = oscr.ingest_many(payload, cfg)
-check("one lead imported", counts.get("imported") == 1)
+check("both leads imported including DNC", counts.get("imported") == 2)
 check("duplicate phone skipped", counts.get("duplicate_phone") == 1)
-check("dnc skipped", counts.get("skipped:oscr_dnc") == 1)
+check("DNC not skipped", counts.get("skipped:oscr_dnc", 0) == 0)
 
 with db.connect() as conn:
     people = conn.execute("SELECT full_name, source, lead_score, owner FROM people").fetchall()
     phones = conn.execute("SELECT e164 FROM phone_numbers").fetchall()
     suppressed = conn.execute("SELECT value FROM suppressions WHERE reason='oscr_dnc'").fetchall()
 
-check("only one person row created", len(people) == 1)
+check("both person rows created", len(people) == 2)
 check("campaign source mapped", people[0]["source"] == "OSCR_T65_June")
 check("hot lead score set", people[0]["lead_score"] == 100)
 check("owner assigned", people[0]["owner"] == "chris")
-check("one phone row created", len(phones) == 1 and phones[0]["e164"] == "+13365551001")
-check("dnc phone suppressed", len(suppressed) == 1 and suppressed[0]["value"] == "+13365551002")
+check("both phone rows created", len(phones) == 2 and phones[0]["e164"] == "+13365551001")
+check("DNC flag creates no import suppression", len(suppressed) == 0)
 
 queue = bq.build_queue(owner="chris", limit=10)
-check("hot OSCR lead is queue-ready", len(queue) == 1 and queue[0]["Name"] == "Fresh Lead")
+check("hot OSCR lead is queue-ready", len(queue) == 2 and queue[0]["Name"] == "Fresh Lead")
 check("queue source is preserved", queue[0]["Source"] == "OSCR_T65_June")
 
 passed = sum(1 for _, ok in results if ok)

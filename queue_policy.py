@@ -152,7 +152,7 @@ def retry_status(conn, person_id, phone, stage="", qtype="", agenda_day=None):
     category = str(latest.get("disposition_category") or "").strip().lower()
     call_day = str(latest.get("dialed_at") or "")[:10]
 
-    if disposition in TERMINAL_PHONE_DISPOSITIONS or category in {"bad_number", "dnc"}:
+    if disposition in TERMINAL_PHONE_DISPOSITIONS or category == "bad_number":
         return {
             "allowed": False,
             "reason": "terminal",
@@ -162,7 +162,7 @@ def retry_status(conn, person_id, phone, stage="", qtype="", agenda_day=None):
         }
 
     if needs_retry_check:
-        if disposition not in retryable_dispositions():
+        if disposition not in retryable_dispositions() and category != "dnc" and disposition != "do_not_call":
             return {
                 "allowed": False,
                 "reason": "not_retryable",

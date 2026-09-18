@@ -973,7 +973,7 @@ def _build_ranked_queue(owner="", limit=5000, agenda_date=None, city_filter=None
     """THE single ranking used everywhere — the dialer's call list AND the dashboard's
     'Call Next' both call this, so their order is ALWAYS identical. Priority:
     scheduled-calls-due > callbacks > hot fresh > new(by score) > retry, and within
-    each tier: score desc -> closest city -> name. Excludes DNC/suppressed/future-held."""
+    each tier: score desc -> closest city -> name. Includes DNC numbers and every eligible phone; excludes future-held leads."""
     owner = (owner or "").strip().lower()
     agenda_day = queue_policy.coerce_day(agenda_date)
     due_cutoff = _agenda_window(agenda_day)
@@ -988,19 +988,10 @@ def _build_ranked_queue(owner="", limit=5000, agenda_date=None, city_filter=None
     except Exception:
         pass
     with db.connect() as conn:
-        def suppressed(e):
-            return conn.execute("SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (e,)).fetchone() is not None
-
-        def person_suppressed(pid):
-            return conn.execute("SELECT 1 FROM suppressions WHERE scope='person' AND value=? LIMIT 1", (str(pid),)).fetchone() is not None
-
-        def phone_of(pid):
-            rows = conn.execute("SELECT e164 FROM phone_numbers WHERE person_id=? AND status<>'bad' "
-                                "ORDER BY status='active' DESC", (pid,)).fetchall()
-            for r in rows:
-                if not suppressed(r["e164"]):
-                    return r["e164"]
-            return ""
+        def phones_of(pid):
+            return conn.execute(
+                "SELECT e164, line_type, status FROM phone_numbers WHERE person_id=? AND status<>'bad' "
+                "ORDER BY status='active' DESC, id", (pid,)).fetchall()
 
         # Future-held: a scheduled call after this agenda day stays off this day.
         held = {r["person_id"] for r in conn.execute(
@@ -1018,13 +1009,11 @@ def _build_ranked_queue(owner="", limit=5000, agenda_date=None, city_filter=None
                 f"(SELECT disposition FROM call_attempts c WHERE c.person_id=p.id ORDER BY dialed_at DESC LIMIT 1) last_disposition, "
                 f"(SELECT disposition_category FROM call_attempts c WHERE c.person_id=p.id ORDER BY dialed_at DESC LIMIT 1) last_outcome, "
                 f"(SELECT dialed_at FROM call_attempts c WHERE c.person_id=p.id ORDER BY dialed_at DESC LIMIT 1) last_call_time "
-                f"FROM people p WHERE p.stage<>'dnc' AND p.stage<>'closed'{own}")
+                f"FROM people p WHERE p.stage<>'closed'{own}")
 
         def add(r, qtype, bucket):
             pid = r["id"]
             if pid in seen or pid in held:
-                return
-            if person_suppressed(pid):
                 return
             if not _target_lead(r):
                 return
@@ -1032,38 +1021,30 @@ def _build_ranked_queue(owner="", limit=5000, agenda_date=None, city_filter=None
                 return
             if not _city_matches_filter(r["city"], city_filter):
                 return
-            ph = phone_of(pid)
-            if not ph or suppressed(ph):
-                return
-            # Drop confirmed-landline / deactivated phones once Telnyx Number
-            # Lookup has classified them. Toggle CC_LOOKUP_FILTER_ENABLED off to
-            # short-circuit this (useful while the lookup pass is still running).
-            if _lookup_filter_active():
-                phone_meta = conn.execute(
-                    "SELECT line_type, status FROM phone_numbers WHERE e164=? LIMIT 1", (ph,)
-                ).fetchone()
-                if phone_meta:
-                    if str(phone_meta["status"] or "").lower() == "deactivated":
-                        return
-                    if not _is_callable_line_type(phone_meta["line_type"] or ""):
-                        return
-            status = queue_policy.retry_status(conn, pid, ph, r["stage"], qtype, agenda_day)
-            if not status["allowed"]:
-                return
-            latest = status.get("latest") or {}
             seen.add(pid)
-            bucket.append({"Queue_Type": qtype, "Name": r["full_name"] or "", "Phone": ph,
-                           "Address": r["address"] or "", "City": r["city"] or "", "County": r["county"] or "",
-                           "Birthday": r["birthday"] or "", "Last_Disposition": latest.get("disposition") or r["last_disposition"] or "",
-                           "Last_Outcome": latest.get("disposition_category") or r["last_outcome"] or "",
-                           "Last_Call_Time": latest.get("dialed_at") or r["last_call_time"] or "",
-                           "Attempt_Count": status["attempts"],
-                           "Attempts_Remaining": status["attempts_remaining"],
-                           "Agenda_Date": agenda_day.isoformat(),
-                           "Source": r["source"] or "",
-                           "T65_Month": _t65_month(r["source"], r["birthday"]),
-                           "Lead_Score": r["lead_score"], "person_id": pid,
-                           "_drive": _drive_minutes(r["city"])})
+            for phone_meta in phones_of(pid):
+                ph = phone_meta["e164"]
+                if _lookup_filter_active():
+                    if str(phone_meta["status"] or "").lower() == "deactivated":
+                        continue
+                    if not _is_callable_line_type(phone_meta["line_type"] or ""):
+                        continue
+                status = queue_policy.retry_status(conn, pid, ph, r["stage"], qtype, agenda_day)
+                if not status["allowed"]:
+                    continue
+                latest = status.get("latest") or {}
+                bucket.append({"Queue_Type": qtype, "Name": r["full_name"] or "", "Phone": ph,
+                               "Address": r["address"] or "", "City": r["city"] or "", "County": r["county"] or "",
+                               "Birthday": r["birthday"] or "", "Last_Disposition": latest.get("disposition") or r["last_disposition"] or "",
+                               "Last_Outcome": latest.get("disposition_category") or r["last_outcome"] or "",
+                               "Last_Call_Time": latest.get("dialed_at") or r["last_call_time"] or "",
+                               "Attempt_Count": status["attempts"],
+                               "Attempts_Remaining": status["attempts_remaining"],
+                               "Agenda_Date": agenda_day.isoformat(),
+                               "Source": r["source"] or "",
+                               "T65_Month": _t65_month(r["source"], r["birthday"]),
+                               "Lead_Score": r["lead_score"], "person_id": pid,
+                               "_drive": _drive_minutes(r["city"])})
 
         # Each tier keeps its priority, but WITHIN a tier we rank by score desc then
         # CLOSEST CITY first (shorter drive = likelier to keep an appointment).
@@ -1078,9 +1059,9 @@ def _build_ranked_queue(owner="", limit=5000, agenda_date=None, city_filter=None
                 add(r, "scheduled_call", t_sched)
         for r in conn.execute(base + " AND p.stage='callback'", own_p):
             add(r, "callback", t_call)
-        for r in conn.execute(base + " AND p.stage='new' AND p.first_seen_at>=?", own_p + [cutoff_24h]):
+        for r in conn.execute(base + " AND p.stage IN ('new','dnc') AND p.first_seen_at>=?", own_p + [cutoff_24h]):
             add(r, "hot_fresh", t_hot)
-        for r in conn.execute(base + " AND p.stage='new'", own_p):
+        for r in conn.execute(base + " AND p.stage IN ('new','dnc')", own_p):
             add(r, "never_called", t_new)
         for r in conn.execute(base + " AND p.stage IN ('attempted','voicemail')", own_p):
             add(r, "retry", t_retry)

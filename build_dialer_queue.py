@@ -11,7 +11,7 @@ Call order (highest priority first):
   2) Callbacks-stage leads          (warm)
   3) New leads                      (never called) — by lead_score
   4) Retry leads                    (no-answer/voicemail) — by lead_score, oldest first
-Excludes: DNC, suppressed numbers, already-reached people, and anyone with a
+Includes DNC numbers and every eligible phone. Excludes already-reached people and anyone with a
 scheduled call in the FUTURE (so we don't call before the requested time).
 
 Per-agent: pass --owner chris|will to build that agent's queue into their dialer.
@@ -38,14 +38,6 @@ OUT_COLUMNS = ["Queue_Type", "Name", "Phone", "Address", "City", "County", "Birt
                "Attempts_Remaining", "Agenda_Date", "Source", "Lead_Score", "person_id"]
 
 
-def _is_suppressed_phone(conn, e164):
-    return conn.execute("SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (e164,)).fetchone() is not None
-
-
-def _is_suppressed_person(conn, pid):
-    return conn.execute("SELECT 1 FROM suppressions WHERE scope='person' AND value=? LIMIT 1", (str(pid),)).fetchone() is not None
-
-
 def build_queue(owner="", limit=2000, did_cap=0, agenda_date=None, city_filter=""):
     """Return a list of ordered contact dicts (highest priority first)."""
     agenda_day = queue_policy.coerce_day(agenda_date)
@@ -65,13 +57,11 @@ def build_queue(owner="", limit=2000, did_cap=0, agenda_date=None, city_filter="
     with db.connect() as conn:
         def phones(pid):
             return [r["e164"] for r in conn.execute(
-                "SELECT e164 FROM phone_numbers WHERE person_id=? AND status<>'bad' ORDER BY status='active' DESC", (pid,))]
+                "SELECT e164 FROM phone_numbers WHERE person_id=? AND status<>'bad' ORDER BY status='active' DESC, id", (pid,))]
 
         def add(person, qtype):
             pid = person["id"]
             if pid in seen:
-                return
-            if _is_suppressed_person(conn, pid):
                 return
             if not geo_policy.birthday_is_target(person["birthday"]):
                 return
@@ -79,26 +69,23 @@ def build_queue(owner="", limit=2000, did_cap=0, agenda_date=None, city_filter="
                 return
             if city_filter and geo_policy.normalize_city(person["city"]) != geo_policy.normalize_city(city_filter):
                 return
-            ph = phones(pid)
-            ph = [x for x in ph if not _is_suppressed_phone(conn, x)]
-            if not ph:
-                return
-            status = queue_policy.retry_status(conn, pid, ph[0], person["stage"], qtype, agenda_day)
-            if not status["allowed"]:
-                return
-            latest = status.get("latest") or {}
             seen.add(pid)
-            rows.append({
-                "Queue_Type": qtype, "Name": person["full_name"] or "", "Phone": ph[0],
-                "Address": person["address"] or "", "City": person["city"] or "",
-                "County": person["county"] or "", "Birthday": person["birthday"] or "",
-                "Last_Disposition": latest.get("disposition") or person["last_disposition"] or "",
-                "Last_Outcome": latest.get("disposition_category") or person["last_outcome"] or "",
-                "Last_Call_Time": latest.get("dialed_at") or person["last_call_time"] or "",
-                "Attempt_Count": status["attempts"], "Attempts_Remaining": status["attempts_remaining"],
-                "Agenda_Date": agenda_day.isoformat(),
-                "Source": person["source"] or "", "Lead_Score": person["lead_score"], "person_id": pid,
-            })
+            for phone in phones(pid):
+                status = queue_policy.retry_status(conn, pid, phone, person["stage"], qtype, agenda_day)
+                if not status["allowed"]:
+                    continue
+                latest = status.get("latest") or {}
+                rows.append({
+                    "Queue_Type": qtype, "Name": person["full_name"] or "", "Phone": phone,
+                    "Address": person["address"] or "", "City": person["city"] or "",
+                    "County": person["county"] or "", "Birthday": person["birthday"] or "",
+                    "Last_Disposition": latest.get("disposition") or person["last_disposition"] or "",
+                    "Last_Outcome": latest.get("disposition_category") or person["last_outcome"] or "",
+                    "Last_Call_Time": latest.get("dialed_at") or person["last_call_time"] or "",
+                    "Attempt_Count": status["attempts"], "Attempts_Remaining": status["attempts_remaining"],
+                    "Agenda_Date": agenda_day.isoformat(),
+                    "Source": person["source"] or "", "Lead_Score": person["lead_score"], "person_id": pid,
+                })
 
         base = f"""
             SELECT p.id, p.full_name, p.address, p.city, p.county, p.birthday, p.source,
@@ -109,7 +96,7 @@ def build_queue(owner="", limit=2000, did_cap=0, agenda_date=None, city_filter="
                     ORDER BY dialed_at DESC LIMIT 1) last_outcome,
                    (SELECT dialed_at FROM call_attempts c WHERE c.person_id=p.id
                     ORDER BY dialed_at DESC LIMIT 1) last_call_time
-            FROM people p WHERE p.stage<>'dnc'{own_sql} """
+            FROM people p WHERE p.stage<>'closed'{own_sql} """
 
         # 1) Scheduled calls that are DUE now (callbacks they asked for, redials)
         due = conn.execute(f"""
@@ -136,13 +123,13 @@ def build_queue(owner="", limit=2000, did_cap=0, agenda_date=None, city_filter="
         # 3a) HOT leads first — brand new, imported in the last 24h (speed-to-lead is the
         #     #1 conversion predictor: fresh leads answer + convert far better).
         cutoff = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
-        for r in conn.execute(base + " AND p.stage='new' AND p.first_seen_at>=? ORDER BY p.lead_score DESC, p.first_seen_at DESC",
+        for r in conn.execute(base + " AND p.stage IN ('new','dnc') AND p.first_seen_at>=? ORDER BY p.lead_score DESC, p.first_seen_at DESC",
                               own_p + [cutoff]):
             if r["id"] not in hold_ids:
                 add(dict(r), "hot_fresh")
 
         # 3b) Other new leads (never called) by score
-        for r in conn.execute(base + " AND p.stage='new' ORDER BY p.lead_score DESC, p.first_seen_at ASC", own_p):
+        for r in conn.execute(base + " AND p.stage IN ('new','dnc') ORDER BY p.lead_score DESC, p.first_seen_at ASC", own_p):
             if r["id"] not in hold_ids:
                 add(dict(r), "never_called")
 
@@ -153,7 +140,8 @@ def build_queue(owner="", limit=2000, did_cap=0, agenda_date=None, city_filter="
                 before = len(rows)
                 add(dict(r), "retry")
                 if len(rows) > before:
-                    retry_rows.append(rows.pop())
+                    retry_rows.extend(rows[before:])
+                    del rows[before:]
         retry_rows.sort(key=lambda x: (-(x["Lead_Score"] or 0), x["Last_Call_Time"] or "", x["Name"]))
         rows.extend(retry_rows)
 

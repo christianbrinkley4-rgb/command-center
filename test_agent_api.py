@@ -88,18 +88,18 @@ check("opt-out ok", r.get_json()["ok"])
 r = get("/agent/leads/outreach-queue?channel=email&source=T65_June2026")
 check("opted-out lead removed from outreach", r.get_json()["count"] == 0)
 r = get("/agent/leads/call-queue?owner=chris")
-check("opted-out lead removed from call queue (now dnc)", all(l["id"] != jane_id for l in r.get_json()["leads"]))
+check("DNC lead retained in call queue", any(l["id"] == jane_id for l in r.get_json()["leads"]))
 
 print("\n=== hardening: opt-out by phone + suppressed re-import ===")
 # Bob opts out via a STOP text (we only know his phone, not his id)
 r = post("/agent/leads/opt-out", {"phone": "3365550102", "reason": "opt_out"})
 check("opt-out by phone matches person", r.get_json().get("matched_person") is True)
-# Re-pulling a list that includes Bob's number must NOT resurrect him
+# Re-import preserves the existing lead and its numbers, including DNC records.
 r = post("/agent/leads/import", {"source": "T65_July2026",
          "leads": [{"name": "Bob Smith", "phone": "3365550102", "city": "High Point", "birthday": "1962-07-15"},
                    {"name": "New Guy", "phone": "3365550199", "city": "Greensboro", "birthday": "1962-01-01"}]})
 j = r.get_json()
-check("suppressed number skipped on re-import", j.get("suppressed", 0) == 1)
+check("DNC number retained on re-import", j.get("suppressed", 0) == 0 and j["duplicates"] == 1)
 check("fresh lead still imported", j["imported"] == 1)
 # STOP from an unknown number is still recorded so we never text it
 r = post("/agent/leads/opt-out", {"phone": "9995551234", "reason": "opt_out"})
@@ -231,7 +231,7 @@ with db.connect() as _conn:
 check("DNC creates person suppression", _sup >= 1)
 check("DNC creates phone suppression for every phone", _phone_sup >= 1)
 r = get("/agent/leads/call-queue")
-check("DNC lead removed from call queue", all(l["id"] != _new_guy_id for l in r.get_json()["leads"]))
+check("DNC lead remains in call queue", any(l["id"] == _new_guy_id for l in r.get_json()["leads"]))
 
 print("\n=== auth gate ===")
 agent_api.AGENT_TOKEN = "secret-xyz"

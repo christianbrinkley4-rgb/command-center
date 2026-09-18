@@ -49,8 +49,9 @@ The call queue is ordered (top = call first):
 | 4 | **Retry** (no-answer / voicemail) — by score, oldest first | Keep working them without over-calling. |
 
 **Held back:** anyone with a callback scheduled in the FUTURE is kept OUT of today's
-list until their time arrives (so we never call before they asked). DNC + opted-out +
-already-reached are excluded entirely.
+list until their time arrives (so we never call before they asked). Already-reached
+leads are excluded. DNC numbers remain in the call queue, and each eligible phone
+on a lead gets its own queue entry.
 
 **Lead score (0–100)** starts at 50 and is adjusted by:
 - outcome history (callback +, contacted +, repeated no-answers −),

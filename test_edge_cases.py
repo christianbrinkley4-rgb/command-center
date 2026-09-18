@@ -176,13 +176,14 @@ check("unknown owner returns empty queue, no error", q_empty == [])
 q_zero = appmod._build_ranked_queue(owner="chris", limit=0)
 check("limit=0 returns empty queue", q_zero == [])
 
-# Suppress every lead — queue should be empty
+# Suppression metadata does not remove otherwise eligible call-queue entries.
+q_before_sup = appmod._build_ranked_queue(owner="chris", limit=100)
 with db.connect() as conn:
     for pid in [r["id"] for r in conn.execute("SELECT id FROM people WHERE owner='chris'")]:
         conn.execute("INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('person',?, 'test', ?)",
                      (str(pid), now()))
 q_all_sup = appmod._build_ranked_queue(owner="chris", limit=100)
-check("all leads suppressed -> queue empty", q_all_sup == [])
+check("suppressed leads retained in call queue", q_all_sup == q_before_sup)
 
 # Cleanup so other sections see fresh data
 with db.connect() as conn:

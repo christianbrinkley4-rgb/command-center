@@ -31,8 +31,9 @@ POST /agent/leads/import
 -> { "imported":1, "duplicates":0, "suppressed":0, "person_ids":[123] }
 ```
 New leads land under stage `new`. Duplicates (same name+city+birthday, or same phone)
-are auto-detected and enriched — never doubled. Any number previously opted-out/DNC is
-**skipped on import** and counted in `suppressed` (a re-pulled list never resurrects a STOP).
+are auto-detected and enriched — never doubled. DNC-labelled leads and all valid phone numbers are retained on import. Call queues
+include DNC leads and return one entry per eligible phone number. Existing suppression
+records remain available to messaging workflows.
 
 ## 2) Call agent — work the best leads, push winners up
 ```

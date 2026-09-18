@@ -220,6 +220,22 @@ def normalize_phone(value):
     return ""
 
 
+def lead_phones(lead):
+    """Keep every distinct valid phone, including numbers labelled DNC."""
+    phones = []
+    for key, value in (lead or {}).items():
+        name = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        if not any(token in name for token in ("phone", "mobile", "cell", "telephone")) and name not in {"tel", "number"}:
+            continue
+        values = value if isinstance(value, (list, tuple)) else [value]
+        for item in values:
+            for part in re.split(r"[;,|\n]", str(item or "")):
+                phone = normalize_phone(part)
+                if phone and phone not in phones:
+                    phones.append(phone)
+    return phones
+
+
 def _norm(text):
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(text or "").lower())).strip()
 

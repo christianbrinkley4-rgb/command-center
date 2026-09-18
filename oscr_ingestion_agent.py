@@ -7,7 +7,7 @@ connection strategies:
   A) API strategy: poll an OSCR JSON endpoint with a bearer token.
   B) Browser strategy: use Playwright with a persistent authenticated session.
 
-Both strategies feed the same ingestion core: normalize -> DNC/geo/age checks ->
+Both strategies feed the same ingestion core: normalize all phones -> geo/age checks ->
 dedupe by OSCR id and phone -> insert as hot OSCR leads with high lead_score.
 
 Credentials are read only from environment variables. Do not commit real values.
@@ -107,6 +107,7 @@ class Lead:
     source: str = ""
     lead_score: int = 100
     raw: dict[str, Any] = field(default_factory=dict)
+    phones: list[str] = field(default_factory=list)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -268,12 +269,14 @@ def normalize_api_lead(raw: dict[str, Any], config: Config) -> Lead:
     last = pick(raw, "last_name", "lastname", "last name")
     name = pick(raw, "name", "full_name", "fullname", "contact_name") or f"{first} {last}".strip()
     campaign = pick(raw, "campaign", "campaign_name", "tag", "lead_campaign")
+    phones = db.lead_phones(raw)
     lead = Lead(
         oscr_id=pick(raw, "oscr_id", "id", "lead_id", "contact_id"),
         name=name,
         first_name=first,
         last_name=last,
-        phone=db.normalize_phone(pick(raw, "phone", "phone_number", "mobile", "cell", "home_phone")),
+        phone=phones[0] if phones else "",
+        phones=phones,
         address=pick(raw, "address", "street_address", "home_address"),
         city=pick(raw, "city", "home_city", "town"),
         county=pick(raw, "county", "home_county"),
@@ -290,16 +293,9 @@ def normalize_api_lead(raw: dict[str, Any], config: Config) -> Lead:
     return lead
 
 
-def lead_is_dnc(lead: Lead) -> bool:
-    raw_text = json.dumps(lead.raw, default=str).lower()
-    return any(token in raw_text for token in ["do_not_call", "do not call", "donotcall", "opt out", "opted_out"])
-
-
 def should_skip_for_policy(lead: Lead, config: Config) -> tuple[bool, str]:
     if not lead.phone:
         return True, "missing_phone"
-    if lead_is_dnc(lead):
-        return True, "oscr_dnc"
     if lead.birthday:
         old = os.environ.get("CC_TARGET_BIRTH_YEARS", "")
         os.environ["CC_TARGET_BIRTH_YEARS"] = config.target_birth_years
@@ -320,24 +316,24 @@ def ingest_lead(lead: Lead, config: Config) -> tuple[str, int | None]:
     """Insert one lead using a short SQLite transaction.
 
     Returns (status, person_id). Status is one of:
-    imported, duplicate_oscr_id, duplicate_phone, suppressed, skipped.
+    imported, duplicate_oscr_id, duplicate_phone, duplicate_person, skipped.
     """
     skip, reason = should_skip_for_policy(lead, config)
     now = utc_now()
     raw_json = json.dumps(lead.raw, default=str, ensure_ascii=False)
 
     with db.connect() as conn:
-        if lead.oscr_id and conn.execute(
+        seen = conn.execute(
             "SELECT person_id FROM oscr_seen_leads WHERE oscr_id=?", (lead.oscr_id,)
-        ).fetchone():
-            return "duplicate_oscr_id", None
+        ).fetchone() if lead.oscr_id else None
+        if seen and seen["person_id"]:
+            for phone in lead.phones or [lead.phone]:
+                if phone:
+                    conn.execute("INSERT OR IGNORE INTO phone_numbers(person_id, e164, created_at) VALUES (?,?,?)",
+                                 (seen["person_id"], phone, now))
+            return "duplicate_oscr_id", seen["person_id"]
 
         if skip:
-            if reason == "oscr_dnc" and lead.phone:
-                conn.execute(
-                    "INSERT OR IGNORE INTO suppressions(scope, value, reason, created_at) VALUES ('phone',?,?,?)",
-                    (lead.phone, "oscr_dnc", now),
-                )
             if lead.oscr_id:
                 conn.execute(
                     """INSERT OR IGNORE INTO oscr_seen_leads(oscr_id, phone, person_id, source, first_seen_at, raw_json)
@@ -347,16 +343,14 @@ def ingest_lead(lead: Lead, config: Config) -> tuple[str, int | None]:
             db.audit(conn, "oscr", lead.oscr_id or lead.phone, "lead_skipped", reason)
             return f"skipped:{reason}", None
 
-        if conn.execute(
-            "SELECT 1 FROM suppressions WHERE scope='phone' AND value=? LIMIT 1", (lead.phone,)
-        ).fetchone():
-            return "suppressed", None
-
         existing_phone = conn.execute(
             "SELECT person_id FROM phone_numbers WHERE e164=? LIMIT 1", (lead.phone,)
         ).fetchone()
         if existing_phone:
             pid = existing_phone["person_id"]
+            for phone in lead.phones or [lead.phone]:
+                conn.execute("INSERT OR IGNORE INTO phone_numbers(person_id, e164, created_at) VALUES (?,?,?)",
+                             (pid, phone, now))
             if lead.oscr_id:
                 conn.execute(
                     """INSERT OR IGNORE INTO oscr_seen_leads(oscr_id, phone, person_id, source, first_seen_at, raw_json)
@@ -411,6 +405,14 @@ def ingest_lead(lead: Lead, config: Config) -> tuple[str, int | None]:
                 (pid, lead.phone, now),
             )
             status = "imported"
+
+        for phone in lead.phones or [lead.phone]:
+            conn.execute("INSERT OR IGNORE INTO phone_numbers(person_id, e164, created_at) VALUES (?,?,?)",
+                         (pid, phone, now))
+        # A formerly skipped DNC record can now be imported on the next poll.
+        if seen and not seen["person_id"]:
+            conn.execute("UPDATE oscr_seen_leads SET person_id=?, phone=?, raw_json=? WHERE oscr_id=?",
+                         (pid, lead.phone, raw_json, lead.oscr_id))
 
         conn.execute("INSERT OR IGNORE INTO lead_sources(name, first_seen_at) VALUES (?,?)", (lead.source, now))
         conn.execute(
