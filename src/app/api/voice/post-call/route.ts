@@ -16,6 +16,7 @@ const DISPOSITION_MAP: Record<string, string> = {
   no_answer: "No Answer",
   wrong_number: "Wrong Number",
   do_not_call: "Do Not Call",
+  disconnected: "Disconnected",
 };
 
 export async function POST(req: NextRequest) {
