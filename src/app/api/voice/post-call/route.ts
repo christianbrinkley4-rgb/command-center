@@ -5,6 +5,13 @@ import { createHmac, timingSafeEqual } from "crypto";
 const SUPABASE_URL = "https://lyvhrxiukmlvrznkrtkv.supabase.co";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
+if (!SUPABASE_SERVICE_KEY) {
+  console.error(
+    "Voice webhook: SUPABASE_SERVICE_ROLE_KEY is not set. " +
+      "Webhook calls will fail. Add it to the deployment environment variables."
+  );
+}
+
 function getSupabase() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 }
@@ -97,6 +104,20 @@ export async function POST(req: NextRequest) {
       .join("\n");
 
     const supabase = getSupabase();
+
+    // RETRY DEDUP: if Retell redelivers the same call_analyzed event,
+    // skip it. The call_id is embedded in the activity notes.
+    if (callId) {
+      const { data: existing } = await supabase
+        .from("activity_log")
+        .select("id")
+        .eq("lead_id", leadId)
+        .like("notes", `%Retell call: ${callId}%`)
+        .limit(1);
+      if (existing && existing.length > 0) {
+        return NextResponse.json({ received: true, duplicate: true });
+      }
+    }
 
     const { error: activityError } = await supabase.from("activity_log").insert({
       lead_id: leadId,
