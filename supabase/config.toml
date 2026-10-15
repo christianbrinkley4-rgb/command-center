@@ -5,3 +5,14 @@ verify_jwt = false
 
 [functions.voice-post-call]
 verify_jwt = false
+
+# Outbound calling: authenticated by SUPABASE_ANON_KEY at the edge plus
+# RETELL_API_KEY for Retell calls. No user JWT required.
+[functions.voice-start-call]
+verify_jwt = false
+
+[functions.voice-start-batch]
+verify_jwt = false
+
+[functions.voice-batch-status]
+verify_jwt = false
