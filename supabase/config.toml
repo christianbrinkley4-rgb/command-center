@@ -1,0 +1,7 @@
+# These endpoints authenticate inside their handlers: Retell's signature for
+# post-call events and x-voice-secret for calendar actions.
+[functions.voice-calendar]
+verify_jwt = false
+
+[functions.voice-post-call]
+verify_jwt = false
